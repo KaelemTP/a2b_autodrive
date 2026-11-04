@@ -1,0 +1,48 @@
+# a2b_planner parameters for the WorldSim / SimOne truck (Boonray_Truck, full size).
+# Used by a2b_simone.launch.py. The small real truck keeps config/a2b_params.yaml.
+# In PncSim mode Simmoulde publishes /guardian/plan_target (from the case's end_point) and
+# /guardian/task_state (from config.ini [TaskState] State). No fallback goal here: the
+# planner waits for plan_target.
+a2b_planner:
+  ros__parameters:
+    localization_topic: /localization/localization_data
+    plan_target_topic: /guardian/plan_target
+    task_state_topic: /guardian/task_state
+    control_topic: /auto/control_cmd
+    control_debug_topic: /auto/control_debug
+    publish_pwm: false           # never drive the real truck from the sim run
+    rate_hz: 20.0
+    map_frame: world
+    goal_relative: false
+    waypoints: [0.0]
+
+    # Vehicle (confirm with 汪杰). 2.9187 m wheelbase is from simone_bridge.cpp.
+    wheelbase: 2.92
+    max_steer_deg: 35.0          # sim truck's max front-wheel angle - CONFIRM
+    sim_max_steer_deg: 35.0      # same value
+    steer_sign: -1.0             # internal convention, leave as is
+
+    # Pure Pursuit
+    lookahead_min: 4.0           # m
+    lookahead_gain: 1.5          # s
+    lookahead_max: 10.0          # m
+
+    # Speed
+    cruise_speed: 2.0            # m/s, start slow
+    min_speed: 0.5
+    max_lat_accel: 1.0
+    decel: 0.8                   # m/s^2, for slowing down before B
+    kp: 0.3                      # throttle PI (torque mode, driver_mode=0)
+    ki: 0.05
+    ff_gain: 0.1
+
+    # Acceleration mode (driver_mode=1): total_accel_cmd = accel_gain * (v_ref - v)
+    accel_gain: 0.5
+    max_accel: 0.5               # m/s^2, gentle starts
+    max_decel: 1.5               # m/s^2 when stopping
+    stop_brake_pct: 60.0
+
+    # Safety
+    goal_tolerance: 1.5          # m, counts as arrived
+    loc_timeout: 0.5             # s
+    max_cross_track: 3.0         # m off route -> stop

@@ -1,0 +1,42 @@
+# a2b_planner parameters. Topics and messages match the Pnc slot of the WorldSim simulation.
+a2b_planner:
+  ros__parameters:
+    localization_topic: /localization/localization_data   # robominer_msgs/LocalizationData
+    plan_target_topic: /guardian/plan_target              # robominer_msgs/PlanTarget (point B)
+    task_state_topic: /guardian/task_state                # robominer_msgs/TaskState (start/stop)
+    control_topic: /auto/control_cmd                      # robominer_msgs/ControlCmd
+    control_debug_topic: /auto/control_debug              # robominer_msgs/ControlDebug (Simmoulde needs it)
+    publish_pwm: true            # also /pwm_duty for the real truck's Modbus driver
+    rate_hz: 20.0
+    map_frame: world
+    auto_start: false
+
+    # Fallback B if no plan_target arrives. With goal_relative: metres ahead (x) / left (y) of start.
+    goal_x: 10.0
+    goal_y: 0.0
+    goal_relative: true
+    waypoints: [0.0]             # e.g. [6.0, 0.0]; [0.0] = none
+
+    # ControlCmd mapping for the simulation
+    sim_max_steer_deg: 30.0      # target_steering (deg, left +) at full lock; ControlCmd allows +-50
+    stop_brake_pct: 60.0         # target_brake while stopping / stopped
+    accel_gain: 1.0              # total_accel_cmd = gain * (v_ref - v), for driver_mode=1
+    max_accel: 1.0               # m/s^2
+    max_decel: 1.5               # m/s^2 when stopping
+
+    # Truck (measure on the real truck)
+    wheelbase: 0.30
+    max_steer_deg: 30.0
+    steer_sign: -1.0             # <7.5 % = left on this truck
+
+    # Speed / control
+    cruise_speed: 0.6
+    min_speed: 0.25
+    drive_forward_min: 7.9
+    drive_forward_max: 8.6
+    brake_duty: 6.0
+    brake_time: 0.6
+
+    # Safety
+    goal_tolerance: 0.30
+    loc_timeout: 0.5

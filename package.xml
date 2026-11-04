@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>a2b_autodrive</name>
+  <version>0.1.0</version>
+  <description>A to B autonomous driving algorithm for the mini dump truck (perception/control box of the SimOne end-to-end pipeline)</description>
+  <maintainer email="kaelem@example.com">Kaelem</maintainer>
+  <license>MIT</license>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>robominer_msgs</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

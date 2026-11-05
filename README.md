@@ -166,7 +166,10 @@ ros2 topic pub --once /a2b/enable std_msgs/Bool "data: true"   # second terminal
 
 The MuJoCo window shows the route (cyan), B (green), the true trail (mint), the lidar estimate
 (amber arrow + trail) and the lidar returns (dots, coloured by height). It needs a display
-(WSLg works); `gui:=false` runs headless. The browser view at http://localhost:5000 runs too
+(WSLg works); `gui:=false` runs headless. If it lags: `mujoco_sim` prints a `speed:` line every
+2 s (`sim/real` should be about 1.00 and `ticks/s` about 50). The window redraws at 20 Hz with
+400 lidar dots and no shadows; `viewer:=false` (no browser view) and `gui:=false` free the most
+CPU. `shadows:=true` turns shadows back on. The browser view at http://localhost:5000 runs too
 (`viewer:=false` to skip). `mujoco_sim` prints `TRUE ... | LIDAR ... | error x.xx m` every 2 s.
 
 Offline, without ROS (same chain with the KISS-ICP python package, 4 scenarios incl. a lidar

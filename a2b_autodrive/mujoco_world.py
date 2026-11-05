@@ -90,7 +90,7 @@ def build_mjcf(start_x=0.0, start_y=0.0, start_yaw=0.0):
   <option timestep="0.002" gravity="0 0 -9.81"/>
   <visual>
     <global offwidth="1920" offheight="1080"/>
-    <quality shadowsize="4096"/>
+    <quality shadowsize="2048"/>
     <headlight ambient="0.35 0.35 0.35" diffuse="0.5 0.5 0.5"/>
   </visual>
   <asset>

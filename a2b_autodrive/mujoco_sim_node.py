@@ -18,6 +18,8 @@ import math
 import os
 import time
 
+import numpy as np
+
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
@@ -49,7 +51,9 @@ class MujocoSim(Node):
         self.declare_parameter("lidar_rate_hz", 10.0)
         self.declare_parameter("noise", 0.01)           # m, range noise
         self.declare_parameter("gui", True)             # MuJoCo 3D viewer window
-        self.declare_parameter("gui_scan_points", 1500)
+        self.declare_parameter("gui_scan_points", 400)  # lidar dots drawn in the window
+        self.declare_parameter("gui_rate_hz", 20.0)     # window redraws per second
+        self.declare_parameter("gui_shadows", False)    # shadows are slow on WSL / software OpenGL
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         p = Params(wheelbase=g("wheelbase"), max_steer_deg=g("max_steer_deg"))
         self.start = (g("start_x"), g("start_y"), math.radians(g("start_yaw_deg")))
@@ -59,6 +63,8 @@ class MujocoSim(Node):
         self.est, self.path = None, []
         self.est_trail, self.truth_trail = [], []
         self.scan_points = g("gui_scan_points")
+        self.scan_vis = np.zeros((0, 3))
+        self.rng = np.random.default_rng(0)
 
         be = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=5)
         self.create_subscription(Float32MultiArray, "/pwm_duty", self.on_pwm, 10)
@@ -81,14 +87,22 @@ class MujocoSim(Node):
                 with self.viewer.lock():
                     self.viewer.cam.lookat[:] = [self.start[0] + 4.0, self.start[1] + 1.0, 0.0]
                     self.viewer.cam.distance, self.viewer.cam.elevation, self.viewer.cam.azimuth = 10.0, -38.0, 60.0
+                    if not g("gui_shadows"):
+                        self.viewer.scn.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = 0
+                        self.viewer.scn.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 0
             except Exception as e:  # no display, no GL
                 self.get_logger().warn(f"MuJoCo viewer not available ({e}); running headless. "
                                        "Use the browser view (sim_viewer) instead.")
                 self.viewer = None
 
+        # Physics follows the wall clock: if a tick comes late (busy CPU, slow window) the next
+        # step covers the real elapsed time, so the truck never runs in slow motion.
         self.dt = 0.02
-        self.lidar_every = max(1, int(round(1.0 / (g("lidar_rate_hz") * self.dt))))
-        self.k = 0
+        self.lidar_period = 1.0 / g("lidar_rate_hz")
+        self.gui_period = 1.0 / g("gui_rate_hz")
+        self.last_tick = None
+        self.next_scan = self.next_draw = 0.0
+        self.stats = dict(n=0, busy=0.0, sim=0.0, wall=0.0, scan=0.0, draw=0.0)
         self.create_timer(self.dt, self.tick)
         self.create_timer(2.0, self.report)
         self.get_logger().info(f"MuJoCo sim (50 Hz physics, lidar {g('lidar_rate_hz'):.0f} Hz -> "
@@ -117,12 +131,15 @@ class MujocoSim(Node):
     def tick(self):
         if time.monotonic() - self.pwm_t > 0.5:
             self.pwm = [NEUTRAL] * 3
+        t0 = time.monotonic()
+        dt = self.dt if self.last_tick is None else min(max(t0 - self.last_tick, 0.0), 0.1)
+        self.last_tick = t0
         w = self.world
         if self.viewer is not None:
             with self.viewer.lock():
-                x, y, yaw, v = w.step(self.pwm, self.dt)
+                x, y, yaw, v = w.step(self.pwm, dt)
         else:
-            x, y, yaw, v = w.step(self.pwm, self.dt)
+            x, y, yaw, v = w.step(self.pwm, dt)
         stamp = self.get_clock().now().to_msg()
 
         m = LocalizationData()
@@ -142,11 +159,25 @@ class MujocoSim(Node):
         if not self.truth_trail or math.hypot(x - self.truth_trail[-1][0], y - self.truth_trail[-1][1]) > 0.05:
             self.truth_trail.append((x, y))
 
-        if self.k % self.lidar_every == 0:
+        t1 = time.monotonic()
+        if t1 >= self.next_scan:
+            self.next_scan = max(self.next_scan + self.lidar_period, t1)
             self.publish_scan(w.scan(), stamp)
-        self.k += 1
-        if self.viewer is not None:
+            sw = w.last_scan_world
+            if len(sw) > self.scan_points:
+                sw = sw[self.rng.choice(len(sw), self.scan_points, replace=False)]
+            self.scan_vis = sw
+        t2 = time.monotonic()
+        if self.viewer is not None and t2 >= self.next_draw:
+            self.next_draw = max(self.next_draw + self.gui_period, t2)
             self.draw()
+        t3 = time.monotonic()
+        st = self.stats
+        st["n"] += 1
+        st["busy"] += t3 - t0
+        st["scan"] += t2 - t1
+        st["draw"] += t3 - t2
+        st["sim"] += dt
 
     def publish_scan(self, pts, stamp):
         msg = PointCloud2()
@@ -172,13 +203,14 @@ class MujocoSim(Node):
                 pts = self.path[::5] + [self.path[-1]]
                 mw.draw_polyline(scn, pts, (0.2, 0.95, 1.0, 1.0), width=0.022)
                 mw.draw_sphere(scn, self.path[-1][0], self.path[-1][1], 0.15, 0.15, (0.3, 0.95, 0.45, 1.0))
-            if len(self.truth_trail) > 1:
-                mw.draw_polyline(scn, self.truth_trail[-300:], (0.55, 1.0, 0.8, 1.0), width=0.015, z=0.02)
-            if len(self.est_trail) > 1:
-                mw.draw_polyline(scn, self.est_trail[-300:], (1.0, 0.72, 0.25, 1.0), width=0.015, z=0.045)
+            for trail, rgba, z in ((self.truth_trail, (0.55, 1.0, 0.8, 1.0), 0.02),
+                                   (self.est_trail, (1.0, 0.72, 0.25, 1.0), 0.045)):
+                if len(trail) > 1:
+                    step = max(1, len(trail) // 60)       # at most ~60 segments per trail
+                    mw.draw_polyline(scn, trail[::step] + [trail[-1]], rgba, width=0.015, z=z)
             if self.est is not None:
                 mw.draw_arrow(scn, *self.est, (1.0, 0.72, 0.25, 1.0), length=0.5, z=0.55)
-            mw.draw_scan(scn, self.world.last_scan_world, max_points=self.scan_points)
+            mw.draw_scan(scn, self.scan_vis, max_points=self.scan_points)
         self.viewer.sync()
 
     def report(self):
@@ -191,6 +223,14 @@ class MujocoSim(Node):
         else:
             line += " | LIDAR estimate: none yet"
         self.get_logger().info(line)
+        st, now = self.stats, time.monotonic()
+        if st["n"] and st["wall"]:
+            wall = now - st["wall"]
+            self.get_logger().info(
+                f"speed: {st['n'] / wall:.0f} ticks/s (want 50), sim/real {st['sim'] / wall:.2f}, "
+                f"tick {1000 * st['busy'] / st['n']:.1f} ms (lidar {1000 * st['scan'] / st['n']:.1f}, "
+                f"window {1000 * st['draw'] / st['n']:.1f})")
+        self.stats = dict(n=0, busy=0.0, sim=0.0, wall=now, scan=0.0, draw=0.0)
 
     def close(self):
         if self.viewer is not None:

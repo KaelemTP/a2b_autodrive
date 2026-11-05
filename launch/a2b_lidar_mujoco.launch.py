@@ -30,11 +30,12 @@ def generate_launch_description():
         DeclareLaunchArgument("goal_x", default_value="10.0"),   # metres ahead
         DeclareLaunchArgument("goal_y", default_value="3.0"),    # metres left (makes it turn)
         DeclareLaunchArgument("gui", default_value="true"),      # MuJoCo 3D window
+        DeclareLaunchArgument("shadows", default_value="false"), # MuJoCo window shadows (slow on WSL)
         DeclareLaunchArgument("viewer", default_value="true"),   # browser view
         DeclareLaunchArgument("port", default_value="5000"),
         Node(package="a2b_autodrive", executable="mujoco_sim", name="mujoco_sim", output="screen",
              parameters=[{"truth_topic": "/sim/ground_truth", "points_topic": "/mujoco/points",
-                          "gui": L("gui"), "start_x": 0.0, "start_y": 0.0, "start_yaw_deg": 0.0}]),
+                          "gui": L("gui"), "gui_shadows": L("shadows"), "start_x": 0.0, "start_y": 0.0, "start_yaw_deg": 0.0}]),
         # remove the floor before odometry (lidar 0.4 m above ground -> floor at z = -0.4)
         Node(package="a2b_autodrive", executable="ground_filter", name="ground_filter", output="screen",
              parameters=[{"input_topic": "/mujoco/points", "output_topic": "/mujoco/points_no_ground",

@@ -23,6 +23,7 @@ setup(
             "fake_lidar = a2b_autodrive.fake_lidar_node:main",
             "sim_viewer = a2b_autodrive.sim_viewer_node:main",
             "ground_filter = a2b_autodrive.ground_filter_node:main",
+            "mujoco_sim = a2b_autodrive.mujoco_sim_node:main",
         ],
     },
 )

@@ -143,3 +143,38 @@ open **http://localhost:5000** in Chrome/Edge on Windows. It shows the truck, it
 route and B, the lidar estimate and scan (lidar test), state, speed and PWM. Buttons start/stop
 the run; click the map to set a new B. Install Flask once: `sudo apt install python3-flask`.
 Turn it off with `viewer:=false` (a2b_sim) and change the port with `port:=5001`.
+
+## 7. Lidar test in MuJoCo (3D yard, physics truck)
+
+Same lidar chain as section 5, but the truck and the lidar live in a MuJoCo 3D yard
+(checker floor, concrete barriers, boulders, light poles, container, material pile, excavator,
+orange dump pad). The truck is driven by `/pwm_duty` through a planar force model with
+collisions; the lidar on the cab roof (0.25 m ahead of the rear axle, 0.4 m high, 24 rings
+-25..60 deg x 720) ray-casts every geom in the yard except the truck itself.
+
+```
+mujoco_sim -> /mujoco/points -> ground_filter -> KISS-ICP -> lidar_loc_bridge
+           -> /localization/localization_data -> a2b_planner -> /pwm_duty -> mujoco_sim
+```
+
+```bash
+pip install mujoco                                       # once
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ros2 launch a2b_autodrive a2b_lidar_mujoco.launch.py     # B = 10 m ahead, 3 m left
+ros2 topic pub --once /a2b/enable std_msgs/Bool "data: true"   # second terminal
+```
+
+The MuJoCo window shows the route (cyan), B (green), the true trail (mint), the lidar estimate
+(amber arrow + trail) and the lidar returns (dots, coloured by height). It needs a display
+(WSLg works); `gui:=false` runs headless. The browser view at http://localhost:5000 runs too
+(`viewer:=false` to skip). `mujoco_sim` prints `TRUE ... | LIDAR ... | error x.xx m` every 2 s.
+
+Offline, without ROS (same chain with the KISS-ICP python package, 4 scenarios incl. a lidar
+dropout that must stop the truck):
+
+```bash
+pip install mujoco kiss-icp imageio imageio-ffmpeg pillow
+python3 ~/ros2_ws/src/a2b_autodrive/test/mujoco_lidar_sim.py
+python3 ~/ros2_ws/src/a2b_autodrive/test/mujoco_lidar_sim.py --video mujoco_lidar_sim.mp4   # also render a video
+```
+On a machine without a screen, add `MUJOCO_GL=egl` (or `osmesa`) in front of the video command.

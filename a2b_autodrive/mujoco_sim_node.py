@@ -80,20 +80,27 @@ class MujocoSim(Node):
             self.get_logger().warn("gui:=true but no DISPLAY - running headless. "
                                    "Use the browser view (sim_viewer) instead.")
         elif g("gui"):
+            if not g("gui_shadows"):
+                # shadows / reflections are slow on WSL (software OpenGL); turn them off in the
+                # model itself, the lidar does not use them
+                self.world.model.light_castshadow[:] = 0
+                self.world.model.mat_reflectance[:] = 0
             try:
                 import mujoco.viewer
                 self.viewer = mujoco.viewer.launch_passive(self.world.model, self.world.data,
                                                            show_left_ui=False, show_right_ui=False)
-                with self.viewer.lock():
-                    self.viewer.cam.lookat[:] = [self.start[0] + 4.0, self.start[1] + 1.0, 0.0]
-                    self.viewer.cam.distance, self.viewer.cam.elevation, self.viewer.cam.azimuth = 10.0, -38.0, 60.0
-                    if not g("gui_shadows"):
-                        self.viewer.scn.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = 0
-                        self.viewer.scn.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 0
             except Exception as e:  # no display, no GL
                 self.get_logger().warn(f"MuJoCo viewer not available ({e}); running headless. "
                                        "Use the browser view (sim_viewer) instead.")
                 self.viewer = None
+            if self.viewer is not None:
+                with self.viewer.lock():
+                    self.viewer.cam.lookat[:] = [self.start[0] + 4.0, self.start[1] + 1.0, 0.0]
+                    self.viewer.cam.distance = 10.0
+                    self.viewer.cam.elevation = -38.0
+                    self.viewer.cam.azimuth = 60.0
+                self.get_logger().info("MuJoCo window open: route cyan, B green, lidar estimate amber, "
+                                       "lidar returns as dots")
 
         # Physics follows the wall clock: if a tick comes late (busy CPU, slow window) the next
         # step covers the real elapsed time, so the truck never runs in slow motion.

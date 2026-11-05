@@ -71,7 +71,7 @@ SCENARIOS = [
 class Video:
     """Offscreen MuJoCo render + header/footer text bars, like the earlier MuJoCo test video."""
 
-    def __init__(self, world, path, w=960, h=540, fps=40):
+    def __init__(self, world, path, w=960, h=544, fps=40):
         import mujoco
         import imageio.v2 as imageio
         from PIL import Image, ImageDraw, ImageFont
@@ -80,7 +80,7 @@ class Video:
         self.renderer = mujoco.Renderer(world.model, h, w, max_geom=8000)
         self.cam = mujoco.MjvCamera()
         self.cam.distance, self.cam.elevation, self.cam.azimuth = 8.5, -38.0, 60.0
-        self.writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=7, macro_block_size=8)
+        self.writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=7, macro_block_size=1)
         font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
         try:
             self.f1, self.f2 = ImageFont.truetype(font, 20), ImageFont.truetype(font, 17)
@@ -175,6 +175,8 @@ def run(name, route, dropout_at, video=None, start=(0.0, 0.0, 0.0), t_max=45.0):
             err_txt = f"lidar position error {errs[-1]:.3f} m" if errs else "lidar: waiting"
             video.frame(world, name, start, route, truth_trail, est_trail, est_w,
                         world.last_scan_world, footer, err_txt)
+        if video and k % 40 == 0:     # rendering is slow: show it is still working
+            print(f"  {name}: {t:4.1f} s simulated, {cmd.state}", flush=True)
         if cmd.state != "DRIVING" and abs(world.speed) < 0.01 and pwm[2] == 7.5:
             break
     if video:   # hold the last frame for a second
@@ -202,12 +204,17 @@ if __name__ == "__main__":
         world0 = mw.MujocoTruckWorld()
         vid = Video(world0, args.video)
     results = []
-    for name, route, drop, expected in SCENARIOS:
-        state, dist_b, errs = run(name, route, drop, vid)
-        results.append((name, state, expected, dist_b, errs))
-    if vid:
-        vid.close()
-        print("video saved to", args.video)
+    try:
+        for name, route, drop, expected in SCENARIOS:
+            if vid:
+                print(f"rendering '{name}' ...", flush=True)
+            state, dist_b, errs = run(name, route, drop, vid)
+            results.append((name, state, expected, dist_b, errs))
+    finally:   # also on Ctrl+C or an error: finish the mp4 so it plays
+        if vid:
+            vid.close()
+            print("video saved to", args.video, "" if len(results) == len(SCENARIOS) else
+                  f"(incomplete: {len(results)} of {len(SCENARIOS)} scenarios)", flush=True)
     for name, state, expected, dist_b, errs in results:
         assert state == expected, f"{name}: {state} != {expected}"
         assert errs.max() < 0.3, f"{name}: lidar error {errs.max():.2f} m"

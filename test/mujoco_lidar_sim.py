@@ -14,6 +14,7 @@ machine set MUJOCO_GL=osmesa or egl).
     pip install mujoco kiss-icp imageio imageio-ffmpeg pillow
     python3 test/mujoco_lidar_sim.py                      # checks only
     MUJOCO_GL=egl python3 test/mujoco_lidar_sim.py --video test/mujoco_lidar_sim.mp4
+    python3 test/mujoco_lidar_sim.py --video demo.mp4 --fast     # about 3x faster to render
 """
 import argparse
 import math
@@ -71,12 +72,13 @@ SCENARIOS = [
 class Video:
     """Offscreen MuJoCo render + header/footer text bars, like the earlier MuJoCo test video."""
 
-    def __init__(self, world, path, w=960, h=544, fps=40):
+    def __init__(self, world, path, w=960, h=544, fps=40, every=1):
         import mujoco
         import imageio.v2 as imageio
         from PIL import Image, ImageDraw, ImageFont
         self.mujoco, self.Image, self.ImageDraw = mujoco, Image, ImageDraw
         self.w, self.h = w, h
+        self.every = every          # render every n-th control step
         self.renderer = mujoco.Renderer(world.model, h, w, max_geom=8000)
         self.cam = mujoco.MjvCamera()
         self.cam.distance, self.cam.elevation, self.cam.azimuth = 8.5, -38.0, 60.0
@@ -167,7 +169,7 @@ def run(name, route, dropout_at, video=None, start=(0.0, 0.0, 0.0), t_max=45.0):
             est_trail.append(est_w[:2])
             if loc_age < 0.15:    # only while the lidar is running (not the frozen dropout pose)
                 errs.append(math.hypot(est_w[0] - x, est_w[1] - y))
-        if video and k % 1 == 0:
+        if video and k % video.every == 0:
             gx, gy = mw.odom_to_world(start, *route[-1], 0.0)[:2]
             lost = " (lidar lost)" if loc_age > p.loc_timeout else ""
             footer = (f"{t:4.1f}s  {cmd.state}{lost}   speed {world.speed:.2f} m/s   "
@@ -180,7 +182,7 @@ def run(name, route, dropout_at, video=None, start=(0.0, 0.0, 0.0), t_max=45.0):
         if cmd.state != "DRIVING" and abs(world.speed) < 0.01 and pwm[2] == 7.5:
             break
     if video:   # hold the last frame for a second
-        for _ in range(20):
+        for _ in range(20 // video.every):
             video.frame(world, name, start, route, truth_trail, est_trail, est_w, world.last_scan_world,
                         footer, err_txt)
 
@@ -197,12 +199,14 @@ def run(name, route, dropout_at, video=None, start=(0.0, 0.0, 0.0), t_max=45.0):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--video", help="write an mp4 of all scenarios to this path")
+    ap.add_argument("--fast", action="store_true",
+                    help="video: half the frames at 768x432 (about 3x faster, same 2x playback)")
     args = ap.parse_args()
     vid = None
     if args.video:
         os.environ.setdefault("MUJOCO_GL", "egl")
         world0 = mw.MujocoTruckWorld()
-        vid = Video(world0, args.video)
+        vid = Video(world0, args.video, *((768, 432, 20, 2) if args.fast else (960, 544, 40, 1)))
     results = []
     try:
         for name, route, drop, expected in SCENARIOS:

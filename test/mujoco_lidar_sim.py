@@ -175,7 +175,7 @@ def run(name, route, dropout_at, video=None, start=(0.0, 0.0, 0.0), t_max=45.0):
             err_txt = f"lidar position error {errs[-1]:.3f} m" if errs else "lidar: waiting"
             video.frame(world, name, start, route, truth_trail, est_trail, est_w,
                         world.last_scan_world, footer, err_txt)
-        if video and k % 40 == 0:     # rendering is slow: show it is still working
+        if video and k % 20 == 0:     # rendering can be slow: show it is still working
             print(f"  {name}: {t:4.1f} s simulated, {cmd.state}", flush=True)
         if cmd.state != "DRIVING" and abs(world.speed) < 0.01 and pwm[2] == 7.5:
             break

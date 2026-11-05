@@ -33,6 +33,7 @@ class TruckSimNode(Node):
         self.declare_parameter("top_speed", 2.0)       # m/s at 10 % duty
         self.declare_parameter("wheelbase", 0.30)
         self.declare_parameter("max_steer_deg", 30.0)
+        self.declare_parameter("localization_topic", "/localization/localization_data")  # /sim/ground_truth in the lidar test
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         p = Params(wheelbase=g("wheelbase"), max_steer_deg=g("max_steer_deg"))
         self.sim = TruckSim(p, g("start_x"), g("start_y"), math.radians(g("start_yaw_deg")), g("top_speed"))
@@ -40,7 +41,7 @@ class TruckSimNode(Node):
         self.pwm_t = 0.0
         self.create_subscription(Float32MultiArray, "/pwm_duty", self.on_pwm, 10)
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=5)
-        self.pub_loc = self.create_publisher(LocalizationData, "/localization/localization_data", qos)
+        self.pub_loc = self.create_publisher(LocalizationData, g("localization_topic"), qos)
         self.tf = TransformBroadcaster(self)
         self.dt = 0.02
         self.create_timer(self.dt, self.tick)

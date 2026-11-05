@@ -93,3 +93,53 @@ B comes from Guardian's `plan_target`, and the run starts on `task_state` = STAR
 - `sim_max_steer_deg`: the sim vehicle's full steering angle in `target_steering` degrees.
 - Weaving → raise `lookahead_min`. Cutting corners → lower it.
 - Check in the first sim run that yaw 0° = east (the truck should head towards B, not sideways).
+
+## 4. Real mini truck with lidar localization
+
+Position comes from the Airy lidar instead of a simulator:
+
+```
+Airy (rslidar_sdk) -> /rslidar_points -> ground_filter -> /points_no_ground -> KISS-ICP -> /kiss/odometry
+   -> lidar_loc_bridge -> /localization/localization_data -> a2b_planner -> /pwm_duty -> Modbus driver
+```
+
+The odometry frame starts where the truck is when KISS-ICP starts (x = straight ahead, yaw 0 =
+starting direction), so B is given as "metres ahead". Use Fast DDS for the point cloud:
+`export RMW_IMPLEMENTATION=rmw_fastrtps_cpp` in every terminal.
+
+```bash
+# T1 lidar driver (rslidar_sdk, lidar_type RSAIRY)
+ros2 launch rslidar_sdk start.py
+# T2 lidar odometry
+# once: build KISS-ICP from source (github.com/PRBonn/kiss-icp, needs CMake >= 3.24)
+ros2 launch kiss_icp odometry.launch.py topic:=/points_no_ground visualize:=false use_sim_time:=false
+# T3 Modbus PWM driver (existing package)
+# T4 bridge + planner, B 3 m ahead; lidar_x_offset = lidar distance in front of rear axle
+ros2 launch a2b_autodrive a2b_lidar.launch.py goal_x:=3.0 lidar_x_offset:=0.25 min_z:=-0.3   # min_z = -(lidar height - 0.1)
+# T5 start
+ros2 topic pub --once /a2b/enable std_msgs/Bool "data: true"
+```
+
+Check first by hand, with the truck's PWM driver off: carry or push the truck 1 m forward and
+watch `ros2 topic echo /localization/localization_data --qos-reliability best_effort` - x should
+go up by about 1.0 and yaw should stay near 0.
+
+## 5. Lidar localization test without hardware
+
+A fake lidar ray-casts a virtual room (walls, pillars, boxes) from the fake truck's true pose.
+KISS-ICP works out the position from those clouds and the planner drives on that alone.
+
+```bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ros2 launch a2b_autodrive a2b_lidar_sim.launch.py          # B = 10 m ahead, 3 m left
+ros2 topic pub --once /a2b/enable std_msgs/Bool "data: true"   # second terminal
+```
+`fake_lidar` prints `TRUE ... | LIDAR ... | error x.xx m` every 2 s.
+
+## 6. Live view in the browser (Flask)
+
+`a2b_sim.launch.py` and `a2b_lidar_sim.launch.py` also start `sim_viewer`, a small Flask page:
+open **http://localhost:5000** in Chrome/Edge on Windows. It shows the truck, its trail, the
+route and B, the lidar estimate and scan (lidar test), state, speed and PWM. Buttons start/stop
+the run; click the map to set a new B. Install Flask once: `sudo apt install python3-flask`.
+Turn it off with `viewer:=false` (a2b_sim) and change the port with `port:=5001`.

@@ -19,6 +19,10 @@ setup(
         "console_scripts": [
             "a2b_planner = a2b_autodrive.a2b_planner_node:main",
             "truck_sim = a2b_autodrive.truck_sim_node:main",
+            "lidar_loc_bridge = a2b_autodrive.lidar_loc_bridge_node:main",
+            "fake_lidar = a2b_autodrive.fake_lidar_node:main",
+            "sim_viewer = a2b_autodrive.sim_viewer_node:main",
+            "ground_filter = a2b_autodrive.ground_filter_node:main",
         ],
     },
 )

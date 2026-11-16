@@ -26,6 +26,7 @@ from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
 from robominer_msgs.msg import LocalizationData, LocalizationStatus
 
 
@@ -66,13 +67,49 @@ class LidarLocBridge(Node):
         qos_in = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=10)
         qos_out = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=5)
         self.create_subscription(Odometry, g("odom_topic"), self.on_odom, qos_in)
+        # simulation reset (viewer button): the truck jumps back to its start, so KISS-ICP is reset
+        # too and its odometry starts again at (0, 0) = the start. Ignore odometry meanwhile.
+        self.declare_parameter("kiss_reset_service", "/kiss/reset")
+        self.reset_until = 0.0
+        self.kiss_reset = None
+        try:
+            from std_srvs.srv import Empty
+            self._Empty = Empty
+            self.kiss_reset = self.create_client(Empty, g("kiss_reset_service"))
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warn(f"std_srvs not available, reset button cannot reset KISS-ICP: {e}")
+        self.create_subscription(Bool, "/sim/reset", self.on_reset, 10)
         self.pub = self.create_publisher(LocalizationData, g("localization_topic"), qos_out)
         self.create_timer(1.0 / g("rate_hz"), self.tick)
         self.create_timer(5.0, self.report)
         self.get_logger().info(f"lidar -> LocalizationData: {g('odom_topic')} -> {g('localization_topic')}, "
                                f"lidar {self.dx:.2f} m ahead of rear axle")
 
+    def on_reset(self, msg):
+        if not msg.data:
+            return
+        now = time.monotonic()
+        self.reset_until = now + 1.5            # report invalid, ignore odometry for a moment
+        self.prev_odom = self.last = self.pose = None
+        self.speed = 0.0
+        if self.kiss_reset is None:
+            return
+        if not self.kiss_reset.wait_for_service(timeout_sec=0.5):
+            self.get_logger().error("reset: KISS-ICP has no reset service (older version?). "
+                                    "Restart the launch to restart the lidar odometry.")
+            return
+        self._reset_timer = self.create_timer(0.3, self._call_kiss_reset)   # after the truck has moved
+
+    def _call_kiss_reset(self):
+        self._reset_timer.cancel()
+        self.kiss_reset.call_async(self._Empty.Request())
+        self.reset_until = time.monotonic() + 0.8
+        self.get_logger().info("reset: KISS-ICP reset, lidar position starts again at the start point")
+
     def on_odom(self, msg):
+        if time.monotonic() < self.reset_until:
+            self.prev_odom = None
+            return
         p = msg.pose.pose
         yaw = yaw_from_quat(p.orientation) - self.yaw_off          # truck heading
         c, s = math.cos(yaw), math.sin(yaw)
@@ -115,7 +152,8 @@ class LidarLocBridge(Node):
         m.header.stamp = self.get_clock().now().to_msg()
         m.header.frame_id = "odom"
         now = time.monotonic()
-        fresh = self.pose is not None and now - self.odom_t < self.timeout and now >= self.lost_until
+        fresh = self.pose is not None and now - self.odom_t < self.timeout and now >= self.lost_until \
+            and now >= self.reset_until
         m.is_valid = bool(fresh)
         if self.pose is not None:
             x, y, yaw = self.pose

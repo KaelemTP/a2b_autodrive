@@ -16,7 +16,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Bool
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster
 from robominer_msgs.msg import LocalizationData, LocalizationStatus
@@ -40,6 +40,8 @@ class TruckSimNode(Node):
         self.pwm = [NEUTRAL] * 3
         self.pwm_t = 0.0
         self.create_subscription(Float32MultiArray, "/pwm_duty", self.on_pwm, 10)
+        self.start_pose = (g("start_x"), g("start_y"), math.radians(g("start_yaw_deg")))
+        self.create_subscription(Bool, "/sim/reset", self.on_reset, 10)   # viewer "Reset truck"
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=5)
         self.pub_loc = self.create_publisher(LocalizationData, g("localization_topic"), qos)
         self.tf = TransformBroadcaster(self)
@@ -47,6 +49,13 @@ class TruckSimNode(Node):
         self.create_timer(self.dt, self.tick)
         self.get_logger().info(f"truck sim running (50 Hz) at ({g('start_x')}, {g('start_y')}), "
                                f"yaw {g('start_yaw_deg')} deg")
+
+    def on_reset(self, msg):
+        if msg.data:
+            self.sim.x, self.sim.y, self.sim.yaw = self.start_pose
+            self.sim.v = 0.0
+            self.pwm = [NEUTRAL] * 3
+            self.get_logger().info("reset: truck back at its start position")
 
     def on_pwm(self, msg):
         if len(msg.data) >= 3:

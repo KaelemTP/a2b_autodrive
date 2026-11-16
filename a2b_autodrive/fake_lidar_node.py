@@ -8,9 +8,14 @@ ray-casts a simple room (4 walls, pillars, boxes, slightly uneven ground) from t
 publishes a sensor_msgs/PointCloud2 in the lidar's own frame, like a real driver does.
 KISS-ICP turns those clouds into odometry; the algorithm never sees the true pose.
 
+Obstacles can be added and removed while it runs: it listens to /sim/obstacles
+(std_msgs/String, JSON list of {"kind": "box"|"cylinder", "x", "y", "size", "height"}), which the
+3D viewer publishes when you place obstacles. They show up in the lidar scan like the room does.
+
 Every 2 s it also prints the true pose next to the lidar-based estimate
 (/localization/localization_data from lidar_loc_bridge), so you can see the error.
 """
+import json
 import math
 import time
 
@@ -19,7 +24,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import DurabilityPolicy
 from sensor_msgs.msg import PointCloud2, PointField
+from std_msgs.msg import String
 from robominer_msgs.msg import LocalizationData
 
 # Room in the world frame (truck starts at 0,0 facing +x). Segments: (x1, y1, x2, y2, height)
@@ -32,15 +39,35 @@ PILLARS = [(5.0, 4.0, 0.3, 3.0), (8.0, -3.0, 0.25, 3.0), (12.5, 5.0, 0.3, 3.0), 
            (19.0, 2.0, 0.4, 3.0), (-3.0, 4.5, 0.3, 3.0)]
 
 
-def _segments():
+def _segments(boxes=()):
     segs = list(WALLS)
-    for x0, y0, x1, y1, h in BOXES:
+    for x0, y0, x1, y1, h in list(BOXES) + list(boxes):
         segs += [(x0, y0, x1, y0, h), (x1, y0, x1, y1, h), (x1, y1, x0, y1, h), (x0, y1, x0, y0, h)]
     return np.array(segs, dtype=float)
 
 
 SEGS = _segments()
 CIRC = np.array(PILLARS, dtype=float)
+
+
+def parse_obstacles(text):
+    """JSON from /sim/obstacles -> (boxes, cylinders) in the room's formats."""
+    boxes, cyls = [], []
+    for o in json.loads(text or "[]"):
+        x, y = float(o["x"]), float(o["y"])
+        size, h = float(o.get("size", 0.6)), float(o.get("height", 1.0))
+        if o.get("kind") == "cylinder":
+            cyls.append((x, y, size / 2.0, h))
+        else:
+            boxes.append((x - size / 2, y - size / 2, x + size / 2, y + size / 2, h))
+    return boxes, cyls
+
+
+def set_obstacles(boxes, cyls):
+    """Replace the user-placed obstacles (the fixed room stays)."""
+    global SEGS, CIRC
+    SEGS = _segments(boxes)
+    CIRC = np.array(list(PILLARS) + list(cyls), dtype=float)
 
 
 def raycast_2d(ox, oy, angles):
@@ -125,10 +152,21 @@ class FakeLidar(Node):
         self.create_subscription(LocalizationData, g("truth_topic"), self.on_truth, be)
         self.create_subscription(LocalizationData, g("estimate_topic"), self.on_est, be)
         self.pub = self.create_publisher(PointCloud2, g("points_topic"), be)
+        latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=1,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(String, "/sim/obstacles", self.on_obstacles, latched)
         self.create_timer(1.0 / g("rate_hz"), self.tick)
         self.create_timer(2.0, self.report)
         self.get_logger().info(f"fake lidar: {g('truth_topic')} -> {g('points_topic')} "
                                f"({g('rate_hz'):.0f} Hz, room 28 x 16 m with pillars and boxes)")
+
+    def on_obstacles(self, m):
+        try:
+            boxes, cyls = parse_obstacles(m.data)
+            set_obstacles(boxes, cyls)
+            self.get_logger().info(f"obstacles: {len(boxes)} box(es), {len(cyls)} cylinder(s)")
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warn(f"bad /sim/obstacles message: {e}")
 
     def on_truth(self, m):
         self.truth = (m.x, m.y, math.radians(m.yaw))

@@ -2,7 +2,8 @@
 
 truck_sim (true pose on /sim/ground_truth) -> fake_lidar (PointCloud2 of a virtual room)
 -> ground_filter -> KISS-ICP -> lidar_loc_bridge -> /localization/localization_data -> a2b_planner -> /pwm_duty
--> truck_sim. The planner only sees the lidar-based position. fake_lidar prints TRUE vs LIDAR. Live view: http://localhost:5000
+-> truck_sim. The planner only sees the lidar-based position. fake_lidar prints TRUE vs LIDAR.
+Live 3D view: http://localhost:5000 - place boxes / cylinders there; the truck steers around them.
 
 Run with RMW_IMPLEMENTATION=rmw_fastrtps_cpp (point clouds are large). Start the run with:
   ros2 topic pub --once /a2b/enable std_msgs/Bool "data: true"
@@ -12,7 +13,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -25,6 +26,10 @@ def generate_launch_description():
         DeclareLaunchArgument("goal_x", default_value="10.0"),   # metres ahead
         DeclareLaunchArgument("goal_y", default_value="3.0"),    # metres left (makes it turn)
         DeclareLaunchArgument("port", default_value="5000"),     # live view: http://localhost:5000
+        DeclareLaunchArgument("waypoints", default_value="[0.0]"),  # e.g. "[3.0, 0.0, 6.0, 2.0]" (x1,y1,x2,y2 metres ahead/left); [0.0] = none
+        DeclareLaunchArgument("obstacle_stop", default_value="/fake_lidar/points_no_ground"),  # "off" = no obstacle stop/avoid
+        DeclareLaunchArgument("avoid", default_value="true"),    # false = only stop and wait at obstacles (v0.3)
+        DeclareLaunchArgument("reverse", default_value="true"),  # back up when boxed in (sim truck only: reverse PWM not measured)
         Node(package="a2b_autodrive", executable="truck_sim", name="truck_sim", output="screen",
              parameters=[{"localization_topic": "/sim/ground_truth", "start_x": 0.0, "start_y": 0.0,
                           "start_yaw_deg": 0.0}]),
@@ -47,5 +52,8 @@ def generate_launch_description():
         TimerAction(period=2.0, actions=[
             Node(package="a2b_autodrive", executable="a2b_planner", name="a2b_planner", output="screen",
                  parameters=[cfg, {"goal_x": L("goal_x"), "goal_y": L("goal_y"), "goal_relative": True,
-                                   "publish_pwm": True, "map_frame": "odom_lidar"}])]),
+                                   "waypoints": L("waypoints"), "publish_pwm": True, "map_frame": "odom_lidar",
+                                   "obstacle_cloud_topic": L("obstacle_stop"), "lidar_x_offset": offset,
+                                   "avoid_enable": PythonExpression(["'", L("avoid"), "'.lower() == 'true'"]),
+                                   "reverse_enable": PythonExpression(["'", L("reverse"), "'.lower() == 'true'"])}])]),
     ])

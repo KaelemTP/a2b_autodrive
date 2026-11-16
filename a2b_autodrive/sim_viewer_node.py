@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 """
-sim_viewer_node  -  live top-down view of the A->B simulation in a web browser (Flask).
+sim_viewer_node  -  live 3D view of the A->B simulation in a web browser (Flask + three.js).
 
 Open http://localhost:5000 (from Windows too: WSL forwards localhost).
 
-Shows the true truck pose and trail, the lidar-based estimate and its trail, the latest
-lidar scan, the planned route, point B, planner state, speed, error and PWM duties.
-Buttons publish /a2b/enable (start / stop); clicking the map publishes /goal_pose (new B).
+Shows the room, the truck (true pose) and the lidar estimate, the 3D lidar scan, the route,
+the path actually followed (with detours around obstacles), B, waypoints, planner state,
+speed and PWM duties. Drag to orbit, right-drag to pan, scroll to zoom.
+
+"Reset truck" stops it and puts it back at its start (/sim/reset: truck_sim jumps back,
+lidar_loc_bridge resets KISS-ICP). Obstacles and B stay.
+
+Clicking the ground does what the selected tool says:
+    Set B      -> /goal_pose
+    Waypoint   -> /a2b/waypoints (nav_msgs/Path), also Shift+click
+    Box / Cylinder -> adds an obstacle, published on /sim/obstacles (std_msgs/String, JSON,
+                  latched); fake_lidar puts it in the scan, so the planner has to avoid it
+    Remove     -> removes the nearest placed obstacle
+The viewer also counts CONTACTS: the true truck body touching a wall, box, pillar or placed
+obstacle. It should stay 0.
 
 Install Flask once:  sudo apt install python3-flask
+The page and three.js are served from this package (share/a2b_autodrive/web), no internet needed.
 """
+import json
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -21,7 +36,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from std_msgs.msg import Bool, Float32MultiArray, String
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
@@ -29,11 +44,57 @@ from sensor_msgs.msg import PointCloud2
 from robominer_msgs.msg import LocalizationData
 
 try:
-    from flask import Flask, jsonify, request, Response
+    from flask import Flask, jsonify, request, Response, send_from_directory
 except ImportError:  # pragma: no cover
     Flask = None
 
 BE = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=5)
+LATCHED = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=1,
+                     durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
+# Truck body for the contact check and the 3D model, metres from the rear axle (measure the truck!)
+TRUCK_REAR, TRUCK_FRONT, TRUCK_HALF_WIDTH = -0.10, 0.45, 0.20
+
+
+def web_dir():
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        d = os.path.join(get_package_share_directory("a2b_autodrive"), "web")
+        if os.path.isdir(d):
+            return d
+    except Exception:  # noqa: BLE001
+        pass
+    return os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web"))  # source tree
+
+
+def truck_outline(x, y, yaw, step=0.05):
+    """Points around the edge of the truck body (map frame)."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    pts = []
+    for fx in np.arange(TRUCK_REAR, TRUCK_FRONT + 1e-9, step):
+        pts += [(fx, -TRUCK_HALF_WIDTH), (fx, TRUCK_HALF_WIDTH)]
+    for fy in np.arange(-TRUCK_HALF_WIDTH, TRUCK_HALF_WIDTH + 1e-9, step):
+        pts += [(TRUCK_REAR, fy), (TRUCK_FRONT, fy)]
+    p = np.array(pts)
+    return np.stack([x + c * p[:, 0] - s * p[:, 1], y + s * p[:, 0] + c * p[:, 1]], 1)
+
+
+def touching(outline, walls, boxes, circles):
+    """True if any outline point is inside a box / circle or within 3 cm of a wall line."""
+    px, py = outline[:, 0], outline[:, 1]
+    for x0, y0, x1, y1 in boxes:
+        if ((px >= x0) & (px <= x1) & (py >= y0) & (py <= y1)).any():
+            return True
+    for cx, cy, r in circles:
+        if (np.hypot(px - cx, py - cy) <= r).any():
+            return True
+    for x0, y0, x1, y1 in walls:
+        ex, ey = x1 - x0, y1 - y0
+        L2 = ex * ex + ey * ey or 1.0
+        t = np.clip(((px - x0) * ex + (py - y0) * ey) / L2, 0, 1)
+        if (np.hypot(px - (x0 + t * ex), py - (y0 + t * ey)) < 0.03).any():
+            return True
+    return False
 
 
 class SimViewer(Node):
@@ -45,10 +106,13 @@ class SimViewer(Node):
         self.declare_parameter("points_topic", "/fake_lidar/points")
         self.declare_parameter("show_room", True)
         self.declare_parameter("lidar_x_offset", 0.25)
-        self.declare_parameter("scan_max_points", 1500)
+        self.declare_parameter("lidar_height", 0.4)
+        self.declare_parameter("scan_max_points", 3000)
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.port = int(g("port"))
+        self.lidar_on = bool(g("points_topic"))     # placed obstacles only matter when a lidar sees them
         self.off = g("lidar_x_offset")
+        self.lidar_h = g("lidar_height")
         self.max_pts = int(g("scan_max_points"))
         self.lock = threading.Lock()
         self.truth = None
@@ -56,21 +120,27 @@ class SimViewer(Node):
         self.truth_trail = deque(maxlen=4000)
         self.est_trail = deque(maxlen=4000)
         self.route = []
+        self.local_path = []
         self.status = "IDLE"
         self.reason = ""
         self.info = {}
         self.pwm = [7.5, 7.5, 7.5]
-        self.scan = []
+        self.scan = np.zeros((0, 3))
         self.goal = None
+        self.waypoints = []
+        self.obstacle = None
+        self.obstacles = []        # placed by the user: dicts kind/x/y/size/height
+        self.contacts = 0
+        self.touching = False
         self.t0 = time.monotonic()
 
         self.room = None
         if g("show_room"):
             try:
                 from a2b_autodrive import fake_lidar_node as fl
-                self.room = {"walls": [list(w[:4]) for w in fl.WALLS],
-                             "boxes": [list(b[:4]) for b in fl.BOXES],
-                             "pillars": [list(p[:3]) for p in fl.PILLARS]}
+                self.room = {"walls": [list(w) for w in fl.WALLS],
+                             "boxes": [list(b) for b in fl.BOXES],
+                             "pillars": [list(p) for p in fl.PILLARS]}
             except Exception:  # noqa: BLE001
                 self.room = None
 
@@ -79,18 +149,24 @@ class SimViewer(Node):
             self.create_subscription(LocalizationData, g("estimate_topic"), self.on_est, BE)
         self.same_topic = g("estimate_topic") == g("truth_topic")
         self.create_subscription(Path, "/a2b/path", self.on_path, 1)
+        self.create_subscription(Path, "/a2b/local_path", self.on_local_path, 1)
         self.create_subscription(String, "/a2b/status", self.on_status, 10)
         self.create_subscription(Float32MultiArray, "/pwm_duty", self.on_pwm, 10)
         if g("points_topic"):
             self.create_subscription(PointCloud2, g("points_topic"), self.on_points, BE)
         self.pub_enable = self.create_publisher(Bool, "/a2b/enable", 10)
         self.pub_goal = self.create_publisher(PoseStamped, "/goal_pose", 10)
+        self.pub_wps = self.create_publisher(Path, "/a2b/waypoints", 10)
+        self.pub_obs = self.create_publisher(String, "/sim/obstacles", LATCHED)
+        self.pub_reset = self.create_publisher(Bool, "/sim/reset", 10)
+        self._publish_obstacles()
 
     # ---- ROS callbacks ---------------------------------------------------------
     def on_truth(self, m):
         with self.lock:
             self.truth = (m.x, m.y, m.yaw, m.speed)
             self._trail(self.truth_trail, m.x, m.y)
+        self._check_contact(m.x, m.y, math.radians(m.yaw))
 
     def on_est(self, m):
         if not m.is_valid:
@@ -104,25 +180,58 @@ class SimViewer(Node):
         if not trail or math.hypot(trail[-1][0] - x, trail[-1][1] - y) > 0.05:
             trail.append((round(x, 3), round(y, 3)))
 
-    def on_path(self, msg):
-        pts = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
+    def _check_contact(self, x, y, yaw):
         with self.lock:
-            self.route = [(round(x, 3), round(y, 3)) for x, y in pts[::5]] + ([pts[-1]] if pts else [])
+            walls = [w[:4] for w in self.room["walls"]] if self.room else []
+            boxes = [b[:4] for b in self.room["boxes"]] if self.room else []
+            circles = [p[:3] for p in self.room["pillars"]] if self.room else []
+            for o in self.obstacles:
+                h = o["size"] / 2
+                if o["kind"] == "cylinder":
+                    circles.append((o["x"], o["y"], h))
+                else:
+                    boxes.append((o["x"] - h, o["y"] - h, o["x"] + h, o["y"] + h))
+        now = touching(truck_outline(x, y, yaw), walls, boxes, circles)
+        with self.lock:
+            if now and not self.touching:
+                self.contacts += 1
+                self.get_logger().warn(f"CONTACT: truck body touches an obstacle at ({x:.2f}, {y:.2f})")
+            self.touching = now
+
+    @staticmethod
+    def _path_pts(msg, every=1):
+        pts = [(round(p.pose.position.x, 3), round(p.pose.position.y, 3)) for p in msg.poses]
+        return (pts[::every] + ([pts[-1]] if pts and every > 1 else [])) if pts else []
+
+    def on_path(self, msg):
+        pts = self._path_pts(msg, 5)
+        with self.lock:
+            self.route = pts
             if pts:
                 self.goal = pts[-1]
+
+    def on_local_path(self, msg):
+        with self.lock:
+            self.local_path = self._path_pts(msg)
 
     def on_status(self, msg):
         s = msg.data
         state = s.split(" ", 1)[0]
         info = {}
-        for key in ("remaining", "v_ref", "cte"):
+        for key in ("remaining", "v_ref", "cte", "avoid"):
             mm = re.search(rf"'{key}': (-?[0-9.]+)", s)
             if mm:
                 info[key] = float(mm.group(1))
         mm = re.search(r"'reason': '([^']*)'", s)
+        mo = re.search(r"obstacle_ahead=(\S+)", s)
+        if "'avoid': 'search'" in s:
+            info["avoid"] = "search"
         with self.lock:
             self.status, self.info = state, info
             self.reason = mm.group(1) if mm else ""
+            self.obstacle = mo.group(1) if mo else None
+            if state in ("IDLE", "ARRIVED", "STOPPED"):
+                self.local_path = []
 
     def on_pwm(self, msg):
         if len(msg.data) >= 3:
@@ -138,11 +247,11 @@ class SimViewer(Node):
             buf = np.frombuffer(bytes(msg.data), dtype=np.uint8).reshape(n, msg.point_step)
             xyz = np.stack([buf[:, offs[k]:offs[k] + 4].copy().view(np.float32)[:, 0] for k in "xyz"], 1)
             xyz = xyz[np.isfinite(xyz).all(1)]
-            xyz = xyz[xyz[:, 2] > -0.2]                     # drop the floor for a clear picture
+            xyz = xyz[xyz[:, 2] > -(self.lidar_h - 0.1)]          # drop the floor for a clear picture
             if len(xyz) > self.max_pts:
                 xyz = xyz[np.linspace(0, len(xyz) - 1, self.max_pts).astype(int)]
             with self.lock:
-                self.scan = np.round(xyz[:, :2], 2).tolist()
+                self.scan = xyz.astype(np.float64)
         except Exception as e:  # noqa: BLE001
             self.get_logger().warn(f"point cloud decode failed: {e}")
 
@@ -154,11 +263,13 @@ class SimViewer(Node):
             # draw the scan around the lidar-based pose (shows how well the estimate fits the room)
             base = est or truth
             scan_world = []
-            if base and self.scan:
+            if base is not None and len(self.scan):
                 x, y, yaw = base[0], base[1], math.radians(base[2])
                 c, s = math.cos(yaw), math.sin(yaw)
                 lx, ly = x + c * self.off, y + s * self.off
-                scan_world = [(round(lx + c * px - s * py, 2), round(ly + s * px + c * py, 2)) for px, py in self.scan]
+                px, py, pz = self.scan[:, 0], self.scan[:, 1], self.scan[:, 2]
+                w = np.stack([lx + c * px - s * py, ly + s * px + c * py, pz + self.lidar_h], 1)
+                scan_world = np.round(w, 2).ravel().tolist()      # flat [x, y, z, x, y, z, ...]
             err = None
             if truth and est:
                 err = math.hypot(truth[0] - est[0], truth[1] - est[1])
@@ -166,9 +277,12 @@ class SimViewer(Node):
                 "t": round(time.monotonic() - self.t0, 1),
                 "truth": truth, "est": est, "error": err,
                 "truth_trail": list(self.truth_trail), "est_trail": list(self.est_trail),
-                "route": self.route, "goal": self.goal, "scan": scan_world,
+                "route": self.route, "local_path": self.local_path, "goal": self.goal, "scan": scan_world,
                 "status": self.status, "reason": self.reason, "info": self.info, "pwm": self.pwm,
-                "room": self.room,
+                "room": self.room, "waypoints": list(self.waypoints), "obstacle": self.obstacle,
+                "obstacles": list(self.obstacles), "contacts": self.contacts, "touching": self.touching,
+                "truck": {"rear": TRUCK_REAR, "front": TRUCK_FRONT, "half_width": TRUCK_HALF_WIDTH},
+                "lidar": self.lidar_on,
             }
 
     def start(self):
@@ -187,18 +301,91 @@ class SimViewer(Node):
         with self.lock:
             self.goal = (float(x), float(y))
 
+    def _publish_waypoints(self):
+        path = Path()
+        path.header.stamp = self.get_clock().now().to_msg()
+        path.header.frame_id = "odom"
+        for x, y in self.waypoints:
+            ps = PoseStamped()
+            ps.header = path.header
+            ps.pose.position.x, ps.pose.position.y = float(x), float(y)
+            ps.pose.orientation.w = 1.0
+            path.poses.append(ps)
+        self.pub_wps.publish(path)
+
+    def add_waypoint(self, x, y):
+        with self.lock:
+            self.waypoints.append((round(float(x), 2), round(float(y), 2)))
+        self._publish_waypoints()
+
+    def clear_waypoints(self):
+        with self.lock:
+            self.waypoints = []
+        self._publish_waypoints()
+
+    def _publish_obstacles(self):
+        with self.lock:
+            data = json.dumps(self.obstacles)
+        self.pub_obs.publish(String(data=data))
+
+    def add_obstacle(self, x, y, kind="box", size=None, height=None):
+        kind = "cylinder" if kind == "cylinder" else "box"
+        size = float(size) if size else (0.5 if kind == "cylinder" else 0.6)
+        height = float(height) if height else (1.7 if kind == "cylinder" else 0.8)
+        o = {"kind": kind, "x": round(float(x), 2), "y": round(float(y), 2),
+             "size": round(max(0.1, min(size, 5.0)), 2), "height": round(height, 2)}
+        with self.lock:
+            self.obstacles.append(o)
+        self._publish_obstacles()
+        self.get_logger().info(f"added {kind} obstacle at ({o['x']}, {o['y']}), size {o['size']} m")
+
+    def remove_obstacle(self, x, y):
+        with self.lock:
+            if not self.obstacles:
+                return
+            k = min(range(len(self.obstacles)),
+                    key=lambda i: math.hypot(self.obstacles[i]["x"] - x, self.obstacles[i]["y"] - y))
+            o = self.obstacles[k]
+            if math.hypot(o["x"] - x, o["y"] - y) > max(1.0, o["size"]):
+                return
+            self.obstacles.pop(k)
+        self._publish_obstacles()
+
+    def clear_obstacles(self):
+        with self.lock:
+            self.obstacles = []
+        self._publish_obstacles()
+
+    def reset_truck(self):
+        """Stop, put the fake truck back at its start, reset the lidar odometry, clear the view."""
+        self.pub_enable.publish(Bool(data=False))
+        self.pub_reset.publish(Bool(data=True))
+        with self.lock:
+            self.route, self.local_path = [], []
+            self.truth = self.est = None
+        self.clear_trails()
+
     def clear_trails(self):
         with self.lock:
             self.truth_trail.clear()
             self.est_trail.clear()
+            self.contacts = 0
 
 
 def make_app(node):
-    app = Flask(__name__)
+    app = Flask(__name__, static_folder=None)   # /static is served from web_dir() below
+    wd = web_dir()
 
     @app.get("/")
     def index():
-        return Response(PAGE, mimetype="text/html")
+        return send_from_directory(wd, "index.html")
+
+    @app.get("/static/<path:name>")
+    def static_file(name):
+        resp = send_from_directory(wd, name)
+        if name.endswith(".js"):
+            resp.mimetype = "text/javascript"
+        return resp
 
     @app.get("/state")
     def state():
@@ -206,122 +393,32 @@ def make_app(node):
 
     @app.post("/cmd/<name>")
     def cmd(name):
+        d = request.get_json(force=True, silent=True) or {}
         if name == "start":
             node.start()
         elif name == "stop":
             node.stop()
         elif name == "clear":
             node.clear_trails()
+        elif name == "reset":
+            node.reset_truck()
+        elif name == "waypoint":
+            node.add_waypoint(d["x"], d["y"])
+        elif name == "clear_waypoints":
+            node.clear_waypoints()
         elif name == "goal":
-            d = request.get_json(force=True)
             node.set_goal(d["x"], d["y"])
+        elif name == "obstacle":
+            node.add_obstacle(d["x"], d["y"], d.get("kind", "box"), d.get("size"), d.get("height"))
+        elif name == "remove_obstacle":
+            node.remove_obstacle(float(d["x"]), float(d["y"]))
+        elif name == "clear_obstacles":
+            node.clear_obstacles()
         else:
             return jsonify(ok=False), 404
         return jsonify(ok=True)
 
     return app
-
-
-PAGE = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>A→B Live Sim</title>
-<style>
-:root{--bg:#12161b;--panel:#1b2128;--line:#2e3742;--ink:#e6eaee;--muted:#93a0ad;--truth:#e6eaee;
---est:#ffb319;--route:#5aa9e6;--goal:#ff6b6b;--scan:#4fd1a5;--ok:#6fd39c;--stop:#ff8a80}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif;
-display:grid;grid-template-columns:1fr 300px;height:100vh}
-#map{width:100%;height:100%;display:block;cursor:crosshair}
-aside{background:var(--panel);border-left:1px solid var(--line);padding:16px;display:flex;flex-direction:column;gap:14px;overflow:auto}
-h1{font-size:18px;margin:0}.muted{color:var(--muted);font-size:12px}
-.state{font:600 15px/1 monospace;padding:8px 10px;border-radius:6px;background:var(--line);text-align:center}
-.state.DRIVING{background:#3a2e12;color:var(--est)}.state.ARRIVED{background:#173327;color:var(--ok)}
-.state.STOPPED{background:#3a1d1b;color:var(--stop)}
-dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0;font-variant-numeric:tabular-nums}
-dt{color:var(--muted)}dd{margin:0;text-align:right;font-family:monospace}
-.btns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-button{font:600 14px system-ui;padding:10px;border-radius:6px;border:1px solid var(--line);background:#232a33;color:var(--ink);cursor:pointer}
-button.go{background:#1f5a3a;border-color:#2d7a50}button.halt{background:#6a2420;border-color:#8a332d}
-button:focus-visible{outline:2px solid var(--est);outline-offset:2px}
-.bar{height:10px;background:#232a33;border-radius:5px;position:relative;overflow:hidden}
-.bar i{position:absolute;top:0;bottom:0;background:var(--est)}.bar b{position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--muted)}
-.legend span{display:inline-flex;align-items:center;gap:6px;margin-right:12px;font-size:12px;color:var(--muted)}
-.legend i{width:14px;height:3px;display:inline-block}
-@media (max-width:760px){body{grid-template-columns:1fr;grid-template-rows:60vh auto;height:auto}}
-</style></head><body>
-<canvas id="map"></canvas>
-<aside>
-  <div><h1>A→B live simulation</h1><div class="muted">Click the map to set B, then Start.</div></div>
-  <div id="state" class="state">IDLE</div>
-  <div id="reason" class="muted"></div>
-  <div class="btns"><button class="go" id="start">Start</button><button class="halt" id="stop">Stop</button>
-  <button id="clear" style="grid-column:span 2">Clear trails</button></div>
-  <dl>
-    <dt>Time</dt><dd id="t">-</dd>
-    <dt>Speed</dt><dd id="v">-</dd>
-    <dt>Target speed</dt><dd id="vref">-</dd>
-    <dt>Distance to B</dt><dd id="rem">-</dd>
-    <dt>Off route</dt><dd id="cte">-</dd>
-    <dt>Lidar error</dt><dd id="err">-</dd>
-    <dt>True pose</dt><dd id="tp">-</dd>
-    <dt>Lidar pose</dt><dd id="ep">-</dd>
-  </dl>
-  <div><div class="muted">PWM1 steering <span id="p1"></span>%</div><div class="bar"><b></b><i id="b1"></i></div></div>
-  <div><div class="muted">PWM3 drive <span id="p3"></span>%</div><div class="bar"><b></b><i id="b3"></i></div></div>
-  <div class="legend"><span><i style="background:var(--truth)"></i>true</span><span><i style="background:var(--est)"></i>lidar</span>
-  <span><i style="background:var(--route)"></i>route</span><span><i style="background:var(--scan)"></i>scan</span></div>
-</aside>
-<script>
-const cv=document.getElementById('map'),ctx=cv.getContext('2d');let S=null,view=null;
-function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
-function resize(){const r=cv.getBoundingClientRect(),d=devicePixelRatio||1;cv.width=r.width*d;cv.height=r.height*d;ctx.setTransform(d,0,0,d,0,0)}
-addEventListener('resize',()=>{resize();view=null});resize();
-function bounds(){let xs=[],ys=[];const add=(x,y)=>{xs.push(x);ys.push(y)};
- if(S.room){S.room.walls.forEach(w=>{add(w[0],w[1]);add(w[2],w[3])})}
- else{(S.truth_trail||[]).forEach(p=>add(p[0],p[1]));(S.route||[]).forEach(p=>add(p[0],p[1]));
-  if(S.truth)add(S.truth[0],S.truth[1]);if(S.goal)add(S.goal[0],S.goal[1])}
- if(!xs.length)return null;let x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
- const pad=Math.max(2,0.08*Math.max(x1-x0,y1-y0));return[x0-pad,y0-pad,x1+pad,y1+pad]}
-function fit(){const b=bounds();if(!b)return;const r=cv.getBoundingClientRect();
- const s=Math.min(r.width/(b[2]-b[0]),r.height/(b[3]-b[1]));view={s,cx:(b[0]+b[2])/2,cy:(b[1]+b[3])/2,w:r.width,h:r.height}}
-function P(x,y){return[view.w/2+(x-view.cx)*view.s,view.h/2-(y-view.cy)*view.s]}
-function W(px,py){return[(px-view.w/2)/view.s+view.cx,-(py-view.h/2)/view.s+view.cy]}
-function inView(x,y){const[p,q]=P(x,y);return p>20&&q>20&&p<view.w-20&&q<view.h-20}
-function line(pts,color,w,dash){if(pts.length<2)return;ctx.beginPath();ctx.setLineDash(dash||[]);
- pts.forEach((p,i)=>{const[a,b]=P(p[0],p[1]);i?ctx.lineTo(a,b):ctx.moveTo(a,b)});ctx.strokeStyle=color;ctx.lineWidth=w;ctx.stroke();ctx.setLineDash([])}
-function truck(pose,color,fill){const[x,y,yawd]=pose,yaw=yawd*Math.PI/180,L=Math.max(0.55,10/view.s),Wd=L*0.6;
- const c=Math.cos(yaw),s=Math.sin(yaw),pts=[[-0.15*L,-Wd/2],[0.85*L,-Wd/2],[1.05*L,0],[0.85*L,Wd/2],[-0.15*L,Wd/2]];
- ctx.beginPath();pts.forEach((p,i)=>{const[a,b]=P(x+c*p[0]-s*p[1],y+s*p[0]+c*p[1]);i?ctx.lineTo(a,b):ctx.moveTo(a,b)});ctx.closePath();
- if(fill){ctx.fillStyle=color;ctx.fill()}else{ctx.strokeStyle=color;ctx.lineWidth=2;ctx.stroke()}}
-function draw(){const r=cv.getBoundingClientRect();ctx.fillStyle=css('--bg');ctx.fillRect(0,0,r.width,r.height);if(!S)return;
- if(!view||(S.truth&&!inView(S.truth[0],S.truth[1]))||(S.goal&&!inView(S.goal[0],S.goal[1])))fit();if(!view)return;
- // 1 m grid
- const step=view.s<8?5:1;const[x0,y1]=W(0,0),[x1,y0]=W(r.width,r.height);ctx.strokeStyle='#1d242c';ctx.lineWidth=1;ctx.beginPath();
- for(let x=Math.floor(x0/step)*step;x<x1;x+=step){const[a]=P(x,0);ctx.moveTo(a,0);ctx.lineTo(a,r.height)}
- for(let y=Math.floor(y0/step)*step;y<y1;y+=step){const[,b]=P(0,y);ctx.moveTo(0,b);ctx.lineTo(r.width,b)}ctx.stroke();
- if(S.room){ctx.strokeStyle='#5b6672';ctx.lineWidth=3;S.room.walls.forEach(w=>{const[a,b]=P(w[0],w[1]),[c,d]=P(w[2],w[3]);ctx.beginPath();ctx.moveTo(a,b);ctx.lineTo(c,d);ctx.stroke()});
-  ctx.fillStyle='#2a323c';S.room.boxes.forEach(b=>{const[a,c]=P(b[0],b[3]),[d,e]=P(b[2],b[1]);ctx.fillRect(a,c,d-a,e-c)});
-  S.room.pillars.forEach(p=>{const[a,b]=P(p[0],p[1]);ctx.beginPath();ctx.arc(a,b,Math.max(3,p[2]*view.s),0,7);ctx.fill()})}
- ctx.fillStyle=css('--scan');(S.scan||[]).forEach(p=>{const[a,b]=P(p[0],p[1]);ctx.fillRect(a-1,b-1,2,2)});
- line(S.route||[],css('--route'),2,[6,5]);line(S.truth_trail||[],css('--truth'),2);line(S.est_trail||[],css('--est'),2,[4,3]);
- if(S.goal){const[a,b]=P(S.goal[0],S.goal[1]);ctx.strokeStyle=css('--goal');ctx.lineWidth=2;ctx.beginPath();ctx.arc(a,b,9,0,7);ctx.stroke();
-  ctx.fillStyle=css('--goal');ctx.font='600 13px system-ui';ctx.fillText('B',a+12,b-10)}
- if(S.route&&S.route.length){const[a,b]=P(S.route[0][0],S.route[0][1]);ctx.fillStyle=css('--route');ctx.fillText('A',a+10,b-10)}
- if(S.est)truck(S.est,css('--est'),false);if(S.truth)truck(S.truth,css('--truth'),true)}
-const $=id=>document.getElementById(id);
-const f=(v,d=2,u='')=>v==null?'-':(+v).toFixed(d)+u;
-function panel(){if(!S)return;const st=document.getElementById('state');st.textContent=S.status;st.className='state '+S.status;
- document.getElementById('reason').textContent=S.reason||'';const pose=S.truth||S.est,i=S.info||{};
- $('t').textContent=f(S.t,1,' s');$('v').textContent=pose?f(pose[3],2,' m/s'):'-';$('vref').textContent=f(i.v_ref,2,' m/s');
- $('rem').textContent=f(i.remaining,2,' m');$('cte').textContent=f(i.cte,2,' m');$('err').textContent=f(S.error,2,' m');
- $('tp').textContent=S.truth?`${f(S.truth[0],1)}, ${f(S.truth[1],1)}, ${f(S.truth[2],0)}°`:'-';
- $('ep').textContent=S.est?`${f(S.est[0],1)}, ${f(S.est[1],1)}, ${f(S.est[2],0)}°`:'-';
- [[1,0],[3,2]].forEach(([n,k])=>{const d=S.pwm[k];document.getElementById('p'+n).textContent=d.toFixed(2);
-  const b=document.getElementById('b'+n),lo=Math.min(d,7.5),hi=Math.max(d,7.5);b.style.left=((lo-5)/5*100)+'%';b.style.width=((hi-lo)/5*100)+'%'})}
-async function poll(){try{S=await (await fetch('/state')).json();panel();draw()}catch(e){}setTimeout(poll,100)}poll();
-const post=(p,b)=>fetch('/cmd/'+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
-$('start').onclick=()=>post('start');$('stop').onclick=()=>post('stop');$('clear').onclick=()=>post('clear');
-cv.addEventListener('click',e=>{if(!view)return;const r=cv.getBoundingClientRect(),[x,y]=W(e.clientX-r.left,e.clientY-r.top);post('goal',{x,y})});
-</script></body></html>"""
 
 
 def main():
@@ -337,7 +434,7 @@ def main():
     web = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=node.port, threaded=True,
                                                   use_reloader=False), daemon=True)
     web.start()
-    node.get_logger().info(f"live view: http://localhost:{node.port}")
+    node.get_logger().info(f"live 3D view: http://localhost:{node.port}  (page files: {web_dir()})")
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A→B 3D Sim</title>
+<style>
+:root{--bg:#12161b;--panel:#1b2128;--line:#2e3742;--ink:#e6eaee;--muted:#93a0ad;--est:#ffb319;--route:#5aa9e6;
+--goal:#ff6b6b;--path:#4fd1a5;--ok:#6fd39c;--stop:#ff8a80;--obs:#ff9f43}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif;
+display:grid;grid-template-columns:1fr 320px;height:100vh;overflow:hidden}
+#view{position:relative;min-width:0}#view canvas{display:block;width:100%;height:100%}
+#hint{position:absolute;left:12px;bottom:10px;color:var(--muted);font-size:12px;pointer-events:none}
+#banner{position:absolute;left:50%;top:12px;transform:translateX(-50%);background:#6a2420;color:#fff;font-weight:600;
+padding:6px 14px;border-radius:6px;display:none}
+#nogl{position:absolute;inset:0;display:none;place-items:center;color:var(--muted);padding:24px;text-align:center}
+aside{background:var(--panel);border-left:1px solid var(--line);padding:14px;display:flex;flex-direction:column;gap:12px;overflow:auto}
+h1{font-size:18px;margin:0}.muted{color:var(--muted);font-size:12px}h2{font-size:12px;margin:0 0 6px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.state{font:600 15px/1 monospace;padding:8px 10px;border-radius:6px;background:var(--line);text-align:center}
+.state.DRIVING{background:#3a2e12;color:var(--est)}.state.ARRIVED{background:#173327;color:var(--ok)}
+.state.STOPPED{background:#3a1d1b;color:var(--stop)}.state.BLOCKED{background:#3a2a12;color:var(--obs)}.state.BACKING{background:#2a2346;color:#b9a6ff}
+dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:0;font-variant-numeric:tabular-nums}
+dt{color:var(--muted)}dd{margin:0;text-align:right;font-family:monospace}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:6px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+button{font:600 13px system-ui;padding:8px 6px;border-radius:6px;border:1px solid var(--line);background:#232a33;color:var(--ink);cursor:pointer}
+button.go{background:#1f5a3a;border-color:#2d7a50}button.halt{background:#6a2420;border-color:#8a332d}
+button.on{background:#2b4a66;border-color:var(--route)}
+button:focus-visible{outline:2px solid var(--est);outline-offset:2px}
+label.row{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}label.row input{flex:1}
+.bar{height:10px;background:#232a33;border-radius:5px;position:relative;overflow:hidden}
+.bar i{position:absolute;top:0;bottom:0;background:var(--est)}.bar b{position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--muted)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px}.legend span{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+.legend i{width:14px;height:4px;display:inline-block;border-radius:2px}
+dd.bad{color:var(--stop)}
+@media (max-width:800px){body{grid-template-columns:1fr;grid-template-rows:60vh auto;height:auto;overflow:auto}}
+</style>
+<script type="importmap">{"imports":{"three":"/static/three.module.min.js"}}</script>
+</head><body>
+<div id="view"><div id="banner">CONTACT</div><div id="nogl">This browser could not start 3D (WebGL). Try Chrome or Edge, or turn on hardware acceleration.</div>
+<div id="hint">Drag: rotate · Right-drag: move · Scroll: zoom · Click ground: use the selected tool</div></div>
+<aside>
+  <div><h1>A→B 3D simulation</h1><div class="muted">Pick a tool, click the ground. Start drives to B; the truck steers around obstacles.</div></div>
+  <div id="state" class="state">IDLE</div>
+  <div id="reason" class="muted"></div>
+  <div class="grid2"><button class="go" id="start">Start</button><button class="halt" id="stop">Stop</button></div>
+  <button id="reset" title="Stop and put the truck back where it started (obstacles stay)">Reset truck to start</button>
+  <div>
+    <h2>Click tool</h2>
+    <div class="grid3" id="tools">
+      <button data-tool="goal" class="on">Set B</button><button data-tool="waypoint">Waypoint</button><button data-tool="remove">Remove</button>
+      <button data-tool="box">Box</button><button data-tool="cylinder">Cylinder</button><button data-tool="none">Look only</button>
+    </div>
+    <label class="row" style="margin-top:8px">Obstacle size <input id="size" type="range" min="0.2" max="2" step="0.1" value="0.6"><span id="sizev">0.6 m</span></label>
+  </div>
+  <div class="grid2"><button id="clearobs">Clear obstacles</button><button id="clearwp">Clear waypoints</button></div>
+  <div>
+    <h2>Camera</h2>
+    <div class="grid3" id="cams"><button data-cam="follow" class="on">Follow</button><button data-cam="top">Top</button><button data-cam="free">Free</button></div>
+  </div>
+  <dl>
+    <dt>Time</dt><dd id="t">-</dd>
+    <dt>Speed</dt><dd id="v">-</dd>
+    <dt>Target speed</dt><dd id="vref">-</dd>
+    <dt>Distance to B</dt><dd id="rem">-</dd>
+    <dt>Detour</dt><dd id="avoid">-</dd>
+    <dt>Obstacle on path</dt><dd id="obs">-</dd>
+    <dt>Contacts</dt><dd id="contacts">0</dd>
+    <dt>Lidar error</dt><dd id="err">-</dd>
+    <dt>True pose</dt><dd id="tp">-</dd>
+    <dt>Lidar pose</dt><dd id="ep">-</dd>
+  </dl>
+  <div><div class="muted">PWM1 steering <span id="p1"></span>%</div><div class="bar"><b></b><i id="b1"></i></div></div>
+  <div><div class="muted">PWM3 drive <span id="p3"></span>%</div><div class="bar"><b></b><i id="b3"></i></div></div>
+  <div class="legend"><span><i style="background:#f2b705"></i>truck (true)</span><span><i style="background:var(--est)"></i>lidar estimate</span>
+  <span><i style="background:var(--route)"></i>route</span><span><i style="background:var(--path)"></i>path followed</span>
+  <span><i style="background:var(--obs)"></i>your obstacles</span><span><i style="background:linear-gradient(90deg,#3b82f6,#22c55e,#eab308)"></i>lidar scan</span></div>
+  <button id="clear">Clear trails &amp; contacts</button>
+</aside>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from '/static/OrbitControls.js';
+
+// ROS map frame (x forward/east, y left/north, z up)  ->  three.js (x, y up, z)
+const V = (x, y, z = 0) => new THREE.Vector3(x, z, -y);
+const $ = id => document.getElementById(id);
+const view = $('view');
+
+let renderer;
+try { renderer = new THREE.WebGLRenderer({ antialias: true }); }
+catch (e) { $('nogl').style.display = 'grid'; throw e; }
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.shadowMap.enabled = true;
+view.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x12161b);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 500);
+camera.position.set(-6, 10, 10);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.target.set(0, 0, 0);
+
+scene.add(new THREE.HemisphereLight(0xcfe3ff, 0x20262e, 1.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(10, 25, 8); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -30, right: 30, top: 30, bottom: -30, near: 1, far: 80 });
+scene.add(sun, sun.target);
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshStandardMaterial({ color: 0x1a2027, roughness: 1 }));
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+const grid = new THREE.GridHelper(60, 60, 0x34404c, 0x252d36); grid.position.y = 0.002; scene.add(grid);
+
+const mat = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.8, ...extra });
+
+// ---------- room ----------
+const room = new THREE.Group(); scene.add(room);
+let roomKey = null, roomCenter = null;
+function buildRoom(r) {
+  room.clear(); if (!r) return;
+  const wallMat = mat(0x5b6672, { transparent: true, opacity: 0.28, depthWrite: false });
+  let xs = [], ys = [];
+  r.walls.forEach(([x0, y0, x1, y1, h]) => {
+    const L = Math.hypot(x1 - x0, y1 - y0), m = new THREE.Mesh(new THREE.BoxGeometry(L, h, 0.12), wallMat);
+    m.position.copy(V((x0 + x1) / 2, (y0 + y1) / 2, h / 2)); m.rotation.y = Math.atan2(y1 - y0, x1 - x0);
+    room.add(m); xs.push(x0, x1); ys.push(y0, y1);
+  });
+  r.boxes.forEach(([x0, y0, x1, y1, h]) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, h, y1 - y0), mat(0x46525f, { transparent: true }));
+    m.position.copy(V((x0 + x1) / 2, (y0 + y1) / 2, h / 2)); m.castShadow = m.receiveShadow = true; room.add(m);
+  });
+  r.pillars.forEach(([cx, cy, rad, h]) => {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(rad, rad, h, 24), mat(0x46525f, { transparent: true }));
+    m.position.copy(V(cx, cy, h / 2)); m.castShadow = true; room.add(m);
+  });
+  if (xs.length) roomCenter = [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2,
+    Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys))];
+}
+
+// ---------- user obstacles ----------
+const obsGroup = new THREE.Group(); scene.add(obsGroup);
+const obsMat = mat(0xff9f43, { roughness: 0.6 });
+let obsKey = '';
+function obstacleMesh(o, material = obsMat) {
+  const g = o.kind === 'cylinder' ? new THREE.CylinderGeometry(o.size / 2, o.size / 2, o.height, 24)
+                                  : new THREE.BoxGeometry(o.size, o.height, o.size);
+  const m = new THREE.Mesh(g, material === obsMat ? obsMat.clone() : material); m.position.copy(V(o.x, o.y, o.height / 2)); m.castShadow = true; return m;
+}
+function buildObstacles(list) {
+  obsGroup.clear(); list.forEach(o => obsGroup.add(obstacleMesh(o)));
+}
+
+// ---------- truck (rear axle at the origin, like the algorithm) ----------
+function makeTruck(dims) {
+  const t = new THREE.Group(), L = dims.front - dims.rear, W = dims.half_width * 2, cx = (dims.front + dims.rear) / 2;
+  const add = (geo, m, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, z, -y); o.castShadow = true; t.add(o); return o; };
+  const body = mat(0xf2b705, { roughness: 0.5 }), dark = mat(0x2a2f36), metal = mat(0x8a939c, { metalness: 0.4 });
+  add(new THREE.BoxGeometry(L, 0.06, W * 0.9), dark, cx, 0, 0.10);                               // chassis
+  add(new THREE.BoxGeometry(L * 0.28, 0.16, W * 0.85), body, dims.front - L * 0.14, 0, 0.21);     // cab
+  add(new THREE.BoxGeometry(L * 0.06, 0.06, W * 0.6), mat(0x9fd3ff, { metalness: 0.2, roughness: 0.2 }), dims.front - 0.01, 0, 0.24); // windscreen
+  const bedL = L * 0.66, bx = dims.rear + bedL / 2 + 0.01;                                          // dump bed
+  add(new THREE.BoxGeometry(bedL, 0.02, W), body, bx, 0, 0.14);
+  add(new THREE.BoxGeometry(bedL, 0.12, 0.02), body, bx, W / 2 - 0.01, 0.20);
+  add(new THREE.BoxGeometry(bedL, 0.12, 0.02), body, bx, -W / 2 + 0.01, 0.20);
+  add(new THREE.BoxGeometry(0.02, 0.12, W), body, dims.rear + 0.01, 0, 0.20);
+  const wheel = new THREE.CylinderGeometry(0.07, 0.07, 0.05, 20); wheel.rotateX(Math.PI / 2);
+  t.wheels = [];
+  [[0, 1], [0, -1], [0.30, 1], [0.30, -1]].forEach(([x, s]) => { const w = add(wheel, dark, x, s * (dims.half_width + 0.01), 0.07); t.wheels.push(w); });
+  add(new THREE.CylinderGeometry(0.045, 0.045, 0.05, 20), metal, 0.25, 0, 0.32);                   // lidar puck (Airy)
+  t.bodyMat = body;
+  return t;
+}
+function makeGhost(dims) {
+  const L = dims.front - dims.rear, W = dims.half_width * 2;
+  const g = new THREE.Group(), box = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(L, 0.3, W)),
+    new THREE.LineBasicMaterial({ color: 0xffb319 }));
+  box.position.set((dims.front + dims.rear) / 2, 0.16, 0); g.add(box); return g;
+}
+let truck = null, ghost = null;
+
+// ---------- lines, scan, markers ----------
+function lineObj(color, dashed, y = 0.03) {
+  const m = dashed ? new THREE.LineDashedMaterial({ color, dashSize: 0.35, gapSize: 0.25 }) : new THREE.LineBasicMaterial({ color });
+  const l = new THREE.Line(new THREE.BufferGeometry(), m); l.userData = { dashed, y }; l.frustumCulled = false; scene.add(l); return l;
+}
+function setLine(l, pts) {
+  l.geometry.dispose();
+  l.geometry = new THREE.BufferGeometry().setFromPoints((pts || []).map(p => V(p[0], p[1], l.userData.y)));
+  if (l.userData.dashed && pts && pts.length > 1) l.computeLineDistances();
+}
+const routeLine = lineObj(0x5aa9e6, true, 0.02), pathLine = lineObj(0x4fd1a5, false, 0.05);
+const trueTrail = lineObj(0xe6eaee, false, 0.015), estTrail = lineObj(0xffb319, true, 0.025);
+
+const MAXP = 6000, scanGeo = new THREE.BufferGeometry();
+scanGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAXP * 3), 3));
+scanGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(MAXP * 3), 3));
+const scanPts = new THREE.Points(scanGeo, new THREE.PointsMaterial({ size: 0.06, vertexColors: true }));
+scanPts.frustumCulled = false; scene.add(scanPts);
+const tmpC = new THREE.Color();
+function setScan(flat) {
+  const n = Math.min((flat || []).length / 3, MAXP), pos = scanGeo.attributes.position.array, col = scanGeo.attributes.color.array;
+  for (let i = 0; i < n; i++) {
+    const x = flat[3 * i], y = flat[3 * i + 1], z = flat[3 * i + 2];
+    pos[3 * i] = x; pos[3 * i + 1] = z; pos[3 * i + 2] = -y;
+    tmpC.setHSL(0.62 - Math.min(Math.max(z / 2.5, 0), 1) * 0.5, 0.85, 0.55);
+    col[3 * i] = tmpC.r; col[3 * i + 1] = tmpC.g; col[3 * i + 2] = tmpC.b;
+  }
+  scanGeo.setDrawRange(0, n); scanGeo.attributes.position.needsUpdate = scanGeo.attributes.color.needsUpdate = true;
+}
+
+function label(text, color) {
+  const c = document.createElement('canvas'); c.width = 128; c.height = 64; const g = c.getContext('2d');
+  g.font = '600 40px system-ui'; g.fillStyle = color; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(text, 64, 32);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false }));
+  s.scale.set(0.8, 0.4, 1); return s;
+}
+const goalM = new THREE.Group(); scene.add(goalM); goalM.visible = false;
+{ const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1.2), mat(0xdddddd)); pole.position.y = 0.6; goalM.add(pole);
+  const flag = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.25, 0.02), mat(0xff6b6b, { emissive: 0x551515 })); flag.position.set(0.2, 1.05, 0); goalM.add(flag);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.26, 0.32, 40), new THREE.MeshBasicMaterial({ color: 0xff6b6b, side: THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.01; goalM.add(ring);
+  const l = label('B', '#ff6b6b'); l.position.y = 1.5; goalM.add(l); }
+const startM = label('A', '#5aa9e6'); scene.add(startM); startM.visible = false;
+const wpGroup = new THREE.Group(); scene.add(wpGroup); let wpKey = '';
+function buildWaypoints(wps) {
+  wpGroup.clear();
+  wps.forEach((w, k) => {
+    const s = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12), mat(0x5aa9e6, { emissive: 0x123a5a })); s.position.copy(V(w[0], w[1], 0.12)); wpGroup.add(s);
+    const l = label(String(k + 1), '#5aa9e6'); l.position.copy(V(w[0], w[1], 0.55)); wpGroup.add(l);
+  });
+}
+
+// ---------- tools & picking ----------
+let tool = 'goal', camMode = 'follow';
+const ghostMat = mat(0xff9f43, { transparent: true, opacity: 0.4 });
+let cursor = null;
+function setCursor() {
+  if (cursor) scene.remove(cursor);
+  const size = +$('size').value;
+  if (tool === 'box' || tool === 'cylinder') cursor = obstacleMesh({ kind: tool, x: 0, y: 0, size, height: tool === 'box' ? 0.8 : 1.7 }, ghostMat);
+  else if (tool === 'none') cursor = null;
+  else { cursor = new THREE.Mesh(new THREE.RingGeometry(0.2, 0.28, 32), new THREE.MeshBasicMaterial({ color: tool === 'remove' ? 0xff8a80 : tool === 'goal' ? 0xff6b6b : 0x5aa9e6, side: THREE.DoubleSide }));
+         cursor.rotation.x = -Math.PI / 2; cursor.position.y = 0.02; }
+  if (cursor) { cursor.visible = false; scene.add(cursor); }
+}
+document.querySelectorAll('#tools button').forEach(b => b.onclick = () => {
+  tool = b.dataset.tool; document.querySelectorAll('#tools button').forEach(x => x.classList.toggle('on', x === b)); setCursor();
+});
+document.querySelectorAll('#cams button').forEach(b => b.onclick = () => {
+  camMode = b.dataset.cam; document.querySelectorAll('#cams button').forEach(x => x.classList.toggle('on', x === b));
+  if (camMode === 'top') topView(); if (camMode === 'follow') followSnap = true;
+});
+$('size').oninput = () => { $('sizev').textContent = (+$('size').value).toFixed(1) + ' m'; setCursor(); };
+setCursor();
+
+const ray = new THREE.Raycaster(), plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), ndc = new THREE.Vector2();
+function groundAt(e) {
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(ndc, camera); const p = new THREE.Vector3();
+  return ray.ray.intersectPlane(plane, p) ? { x: p.x, y: -p.z, v: p } : null;
+}
+let down = null;
+renderer.domElement.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, b: e.button }; });
+renderer.domElement.addEventListener('pointermove', e => {
+  if (!cursor) return; const g = groundAt(e); cursor.visible = !!g;
+  if (g) { cursor.position.x = g.v.x; cursor.position.z = g.v.z; }
+});
+renderer.domElement.addEventListener('pointerleave', () => { if (cursor) cursor.visible = false; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!down) return;
+  if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) {          // a drag moved the camera
+    if (camMode === 'top') { camMode = 'free'; document.querySelectorAll('#cams button').forEach(x => x.classList.toggle('on', x.dataset.cam === 'free')); }
+    return;
+  }
+  if (down.b !== 0) return;
+  const g = groundAt(e); if (!g) return;
+  const t = e.shiftKey ? 'waypoint' : tool, size = +$('size').value;
+  if (t === 'goal') post('goal', g);
+  else if (t === 'waypoint') post('waypoint', g);
+  else if (t === 'box' || t === 'cylinder') post('obstacle', { x: g.x, y: g.y, kind: t, size, height: t === 'box' ? 0.8 : 1.7 });
+  else if (t === 'remove') post('remove_obstacle', g);
+});
+const post = (p, b) => fetch('/cmd/' + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) });
+$('reset').onclick = () => { post('reset'); followSnap = true; };
+$('start').onclick = () => post('start'); $('stop').onclick = () => post('stop'); $('clear').onclick = () => post('clear');
+$('clearwp').onclick = () => post('clear_waypoints'); $('clearobs').onclick = () => post('clear_obstacles');
+
+// ---------- camera ----------
+let followSnap = true, lastTarget = null;
+function topView() {
+  const c = roomCenter || (S && S.truth ? [S.truth[0], S.truth[1], 20] : [0, 0, 20]);
+  controls.target.copy(V(c[0], c[1], 0)); camera.position.copy(V(c[0], c[1] - 0.01, c[2] * 1.15));
+}
+function followCamera() {
+  if (camMode !== 'follow' || !truck || !truck.visible) { lastTarget = null; return; }
+  const p = truck.position.clone();
+  if (followSnap || !lastTarget) {
+    const yaw = truck.rotation.y; controls.target.copy(p);
+    camera.position.set(p.x - Math.cos(yaw) * 4, 3, p.z + Math.sin(yaw) * 4); followSnap = false;
+  } else {
+    const d = p.clone().sub(lastTarget); camera.position.add(d); controls.target.add(d);
+  }
+  lastTarget = p;
+}
+
+// ---------- state from the ROS node ----------
+let S = null;
+const f = (v, d = 2, u = '') => v == null ? '-' : (+v).toFixed(d) + u;
+function apply() {
+  if (!S) return;
+  const rk = JSON.stringify(S.room); if (rk !== roomKey) { roomKey = rk; buildRoom(S.room); if (camMode === 'top') topView(); }
+  const ok = JSON.stringify(S.obstacles); if (ok !== obsKey) { obsKey = ok; buildObstacles(S.obstacles || []); }
+  const wk = JSON.stringify(S.waypoints); if (wk !== wpKey) { wpKey = wk; buildWaypoints(S.waypoints || []); }
+  if (!truck && S.truck) { truck = makeTruck(S.truck); ghost = makeGhost(S.truck); scene.add(truck, ghost); truck.visible = ghost.visible = false; }
+  if (truck) {
+    truck.visible = !!S.truth;
+    if (S.truth) { truck.position.copy(V(S.truth[0], S.truth[1], 0)); truck.rotation.y = S.truth[2] * Math.PI / 180;
+      const steer = -((S.pwm[0] - 7.5) / 2.5) * (30 * Math.PI / 180);   // PWM1 below 7.5 % = left, display only
+      truck.wheels[2].rotation.y = truck.wheels[3].rotation.y = steer;
+      truck.bodyMat.color.set(S.touching ? 0xff3b30 : 0xf2b705); }
+    ghost.visible = !!S.est;
+    if (S.est) { ghost.position.copy(V(S.est[0], S.est[1], 0)); ghost.rotation.y = S.est[2] * Math.PI / 180; }
+  }
+  const c = roomCenter ? [roomCenter[0], roomCenter[1]] : S.truth ? [Math.round(S.truth[0] / 10) * 10, Math.round(S.truth[1] / 10) * 10] : [0, 0];
+  grid.position.x = c[0]; grid.position.z = -c[1];
+  setLine(routeLine, S.route); setLine(pathLine, S.local_path); setLine(trueTrail, S.truth_trail); setLine(estTrail, S.est_trail);
+  setScan(S.scan);
+  goalM.visible = !!S.goal; if (S.goal) goalM.position.copy(V(S.goal[0], S.goal[1], 0));
+  startM.visible = !!(S.route && S.route.length); if (startM.visible) startM.position.copy(V(S.route[0][0], S.route[0][1], 0.5));
+  panel();
+}
+let lidarChecked = false;
+function lidarTools() {
+  if (lidarChecked || !S) return; lidarChecked = true;
+  if (S.lidar) return;
+  ['box', 'cylinder', 'remove'].forEach(t => { const b = document.querySelector(`#tools button[data-tool="${t}"]`); b.disabled = true; b.title = 'Obstacles need the lidar sim (a2b_lidar_sim.launch.py)'; b.style.opacity = 0.4; });
+  $('clearobs').disabled = true; $('clearobs').style.opacity = 0.4;
+}
+function panel() {
+  lidarTools();
+  const st = $('state'); st.textContent = S.status; st.className = 'state ' + S.status;
+  $('reason').textContent = S.reason || '';
+  const pose = S.truth || S.est, i = S.info || {};
+  $('t').textContent = f(S.t, 1, ' s'); $('v').textContent = pose ? f(pose[3], 2, ' m/s') : '-'; $('vref').textContent = f(i.v_ref, 2, ' m/s');
+  $('rem').textContent = f(i.remaining, 2, ' m');
+  $('avoid').textContent = i.avoid === 'search' ? 'way round' : i.avoid == null ? (S.obstacle === 'off' ? 'off' : '-') : Math.abs(i.avoid) < 0.05 ? 'on route' : `${Math.abs(i.avoid).toFixed(2)} m ${i.avoid > 0 ? 'left' : 'right'}`;
+  $('obs').textContent = S.obstacle == null ? '-' : S.obstacle === 'off' ? 'off' : S.obstacle === 'none' ? 'clear' : S.obstacle + ' m';
+  $('contacts').textContent = S.contacts; $('contacts').className = S.contacts ? 'bad' : '';
+  $('banner').style.display = S.touching ? 'block' : 'none';
+  $('err').textContent = f(S.error, 2, ' m');
+  $('tp').textContent = S.truth ? `${f(S.truth[0], 1)}, ${f(S.truth[1], 1)}, ${f(S.truth[2], 0)}°` : '-';
+  $('ep').textContent = S.est ? `${f(S.est[0], 1)}, ${f(S.est[1], 1)}, ${f(S.est[2], 0)}°` : '-';
+  [[1, 0], [3, 2]].forEach(([n, k]) => { const d = S.pwm[k]; $('p' + n).textContent = d.toFixed(2);
+    const b = $('b' + n), lo = Math.min(d, 7.5), hi = Math.max(d, 7.5); b.style.left = ((lo - 5) / 5 * 100) + '%'; b.style.width = ((hi - lo) / 5 * 100) + '%'; });
+}
+async function poll() { try { S = await (await fetch('/state')).json(); apply(); } catch (e) {} setTimeout(poll, 100); }
+poll();
+
+function resize() { const r = view.getBoundingClientRect(); renderer.setSize(r.width, r.height, false); camera.aspect = r.width / Math.max(r.height, 1); camera.updateProjectionMatrix(); }
+addEventListener('resize', resize); resize();
+
+// anything between the camera and the truck becomes see-through, so the truck stays visible
+let faded = [];
+function fadeBlockers() {
+  faded.forEach(m => { m.material.opacity = 1; m.material.transparent = m.userData.wasT; }); faded = [];
+  if (!truck || !truck.visible) return;
+  // fade obstacles that are near the line from the camera to the truck (seen from above)
+  const c = camera.position, t = truck.position, ex = t.x - c.x, ez = t.z - c.z, L2 = ex * ex + ez * ez || 1;
+  const objs = [...obsGroup.children, ...room.children.filter(m => m.geometry.type === 'CylinderGeometry' ||
+                                                                    (m.geometry.type === 'BoxGeometry' && m.material.opacity === 1))];
+  objs.forEach(m => {
+    const u = ((m.position.x - c.x) * ex + (m.position.z - c.z) * ez) / L2;
+    if (u <= 0 || u >= 1.05) return;
+    const px = c.x + u * ex - m.position.x, pz = c.z + u * ez - m.position.z;
+    m.geometry.computeBoundingSphere();
+    const r = Math.min(m.geometry.boundingSphere.radius, 1.5) + 0.5;
+    if (px * px + pz * pz < r * r) {
+      m.userData.wasT = m.material.transparent; m.material.transparent = true; m.material.opacity = 0.25; faded.push(m);
+    }
+  });
+}
+renderer.setAnimationLoop(() => { followCamera(); controls.update(); fadeBlockers(); renderer.render(scene, camera); });
+</script></body></html>

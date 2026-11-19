@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>a2b_autodrive</name>
-  <version>0.4.4</version>
+  <version>0.4.5</version>
   <description>A to B autonomous driving algorithm for the mini dump truck (perception/control box of the SimOne end-to-end pipeline)</description>
   <maintainer email="kaelem@example.com">Kaelem</maintainer>
   <license>MIT</license>

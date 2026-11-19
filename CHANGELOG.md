@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.5 (2026-11-19)
+
+From a coworker's MuJoCo test video (8 scenarios, all passed, 0 contacts):
+- Way round (Hybrid A*) is smoothed before following it. Before, the steering swung from full
+  lock one way to full lock the other (10.0 -> 5.0 -> 10.0 %) going round a wide barrier.
+  The smoothing never moves the path closer to an obstacle.
+- The simulated drive stops at B. Before, it drove on past B and circled round it: the viewer
+  showed a loop at B, and obstacles beyond B could count as "in the way".
+- Fixed corner cutting: in the first metre the clearance check let any truck come within 5 cm
+  of its body (meant only for a truck that is already close). Now it only shrinks to the room
+  the truck has right now. Closest approach in the tests went up (box 0.27 -> 0.32 m, slalom
+  0.32 -> 0.36 m, wide barrier now keeps the full 0.15 m).
+- Real-truck launch keeps 0.50 m round obstacles (`corridor:=0.50`, sims stay 0.35 m), because
+  the truck size is not measured and the lidar position is only good to ~5 cm.
+- New `test/video_checks.py` for these three.
+
 ## 0.4.4 (2026-11-16)
 
 - Way-round search is now Hybrid A*: forward arcs within the truck's turning circle, so the

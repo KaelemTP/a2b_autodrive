@@ -1,7 +1,7 @@
 # a2b_autodrive
 
 Drives the mini dump truck from where it is now (A) to a goal point (B), optionally through
-waypoints, steering around obstacles on the way, and stops there. ROS 2 Humble, Python. Version **0.4.4**.
+waypoints, steering around obstacles on the way, and stops there. ROS 2 Humble, Python. Version **0.4.5**.
 
 It runs in three setups with the same algorithm:
 
@@ -34,14 +34,17 @@ Every 0.05 s:
    0.25, 0.5 … 2.0 m to the left or right of it. For each option it **simulates the drive** for
    the next 5 m from where the truck is and the way it points, with the same steering, turning
    limit and steering speed as the real controller. The truck body (three circles along it) must
-   keep 0.35 m (`corridor_half_width`) from the centre line to every lidar point (a bit less in
-   the first metre, so a truck that is already close can still steer away). It takes the free
+   keep 0.35 m (`corridor_half_width`; **0.50 m on the real truck**) from the centre line to
+   every lidar point. In the first metre it may be less, so a truck that is already close can
+   still steer away, but never less than the room it has right now (so it cannot cut corners).
+   The simulated drive stops at B. It takes the free
    option closest to the route, prefers keeping the same side, slows to 0.4 m/s while off the
    route and comes back once past.
    **Way-round search**: if none of those options is free (e.g. B behind a cluster of
    obstacles), it searches a way round with **Hybrid A\***: only forward arcs the truck can
    actually drive (within 80 % of its tightest turn), on a 10 cm grid made from the lidar points,
-   to B or to a free point further along the route. It checks that path with the same simulated
+   to B or to a free point further along the route. The path is then smoothed (without moving
+   it closer to anything) so the steering does not swing lock to lock. It checks that path with the same simulated
    drive and sticks with it while it stays free. A search takes ~20 ms, at most 0.3 s. The viewer then shows **Detour: way round**.
    If nothing is free it slows and stops 0.4 m before it would get too close (state
    **BLOCKED**), and drives on when an option is free again or the nearest obstacle on the best
@@ -177,6 +180,7 @@ node publishes `/auto/control_cmd`. B should be on a straight road for now (see 
 2. Odometry: `ros2 launch kiss_icp odometry.launch.py topic:=/points_no_ground visualize:=false use_sim_time:=false`
 3. The Modbus PWM driver (listens to `/pwm_duty`)
 4. `ros2 launch a2b_autodrive a2b_lidar.launch.py goal_x:=3.0 lidar_x_offset:=<lidar ahead of rear axle, m> min_z:=<-(lidar height - 0.1)>`
+   (keeps 0.50 m round obstacles; change with `corridor:=0.6`, always with a decimal point)
 5. `ros2 topic pub --once /a2b/enable std_msgs/Bool "data: true"`
 
 First push the truck by hand with the PWM driver off: `x` should go up by about 1.0 per metre.
@@ -210,7 +214,7 @@ Rebuild after editing (`colcon build --packages-select a2b_autodrive`).
 | `goal_tolerance` | 0.3 m | Counted as arrived |
 | `max_cross_track` | 1.5 m | Off route → stop |
 | `obstacle_stop_dist` / `slow_dist` | 1.0 / 2.5 m | From the rear axle |
-| `corridor_half_width` | 0.35 m | Half the truck width + margin |
+| `corridor_half_width` | 0.35 m (real truck 0.50) | Half the truck width + margin. Real-truck launch argument `corridor:=0.50` |
 | `obstacle_resume` | true | false = stop for good at an obstacle |
 | `avoid_enable` | true (sim) | Steer round obstacles. Launch argument `avoid:=true/false`; real-truck launch defaults to false |
 | `avoid_max_offset` | 2.0 m | Furthest a detour goes from the route. Lower it on narrow roads |

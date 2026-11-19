@@ -32,6 +32,10 @@ def generate_launch_description():
         # Steering round obstacles is OFF on the real truck until it has been tried in the sim and
         # on a clear test area: it drives up to 2 m off the route. Off = stop and wait (v0.3).
         DeclareLaunchArgument("avoid", default_value="false"),
+        # Room kept round obstacles, from the truck's centre line. The sims use 0.35 m (body
+        # half width 0.20 + 0.15). The real truck gets 0.50 m: its size is not measured yet and
+        # the lidar position is only good to about 5 cm.
+        DeclareLaunchArgument("corridor", default_value="0.50"),
         Node(package="a2b_autodrive", executable="ground_filter", name="ground_filter", output="screen",
              parameters=[{"input_topic": L("lidar_topic"), "output_topic": "/points_no_ground",
                           "min_z": L("min_z"), "min_range": L("min_range")}]),
@@ -41,5 +45,6 @@ def generate_launch_description():
              parameters=[cfg, {"goal_x": L("goal_x"), "goal_y": L("goal_y"), "goal_relative": True,
                                "waypoints": L("waypoints"), "publish_pwm": True, "map_frame": "odom",
                                "obstacle_cloud_topic": L("obstacle_stop"), "lidar_x_offset": L("lidar_x_offset"),
+                               "corridor_half_width": L("corridor"),
                                "avoid_enable": PythonExpression(["'", L("avoid"), "'.lower() == 'true'"])}]),
     ])

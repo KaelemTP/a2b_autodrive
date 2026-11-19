@@ -466,10 +466,45 @@ class Avoider:
         path = np.array(dense)
         gi = int(np.argmin(np.hypot(*(np.asarray(route.pts) - path[-1]).T)))
         tail = np.asarray(route.pts[gi + 1:gi + 30]) if gi + 1 < len(route.pts) else np.zeros((0, 2))
-        return np.vstack([path, tail]), goal_blocked
+        return self._smooth(np.vstack([path, tail]), len(path), soft, wide, lo), goal_blocked
+
+    def _smooth(self, path, n_search, soft, wide, lo, iters=80, w=0.3):
+        """Take the zig-zag out of a Hybrid A* path. The search only knows 5 fixed turning rates,
+        so its path wiggles, and following it swung the steering from full lock one way to full
+        lock the other. Each point is pulled towards the middle of its neighbours, but never closer
+        to an obstacle than it was (measured in the same margin bands the search uses: within
+        corridor_half_width + 5 cm, within + 40 cm, further), so it does not cut corners. The
+        first 0.3 m (the truck's heading) and the route tail after the way round stay fixed."""
+        import numpy as np
+        g = self.GRID
+        nx, ny = soft.shape
+        n = len(path)
+        if n < 7:
+            return path
+        movable = np.zeros(n, bool)
+        movable[3:min(n_search + 5, n - 2)] = True
+
+        def band(q):   # 2 = within the soft margin, 1 = within the wide margin, 0 = clear
+            ix = np.floor((q[:, 0] - lo[0]) / g).astype(int)
+            iy = np.floor((q[:, 1] - lo[1]) / g).astype(int)
+            ok = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+            res = np.full(len(q), 2)
+            res[ok] = 2 * soft[ix[ok], iy[ok]] + (wide[ix[ok], iy[ok]] & ~soft[ix[ok], iy[ok]])
+            return res
+
+        was = band(path)
+        cur = path.copy()
+        for _ in range(iters):
+            new = cur.copy()
+            new[1:-1] += w * (cur[:-2] + cur[2:] - 2.0 * cur[1:-1])
+            new[~movable] = cur[~movable]
+            bad = band(new) > was                # never move a point closer to an obstacle
+            new[bad] = cur[bad]
+            cur = new
+        return cur
 
     # ---- simulate the drive along each reference ------------------------------------
-    def _simulate(self, refs, x, y, yaw, ld, n_steps, step):
+    def _simulate(self, refs, x, y, yaw, ld, n_steps, step, goal=None):
         import numpy as np
         p = self.p
         K = len(refs)
@@ -487,7 +522,15 @@ class Avoider:
         idx = np.zeros(K, int)
         rows = np.arange(K)
         poses = np.zeros((n_steps, K, 3))
+        # the truck stops at B: a simulated drive that reaches B stays there (before, it drove on
+        # past B and circled round it, which drew a loop and checked for obstacles beyond B)
+        done = np.zeros(K, bool)
+        gx, gy = goal if goal is not None else (math.inf, math.inf)
         for s in range(n_steps):
+            done |= np.hypot(X - gx, Y - gy) < p.goal_tolerance
+            if done.all():
+                poses[s:] = poses[s - 1] if s > 0 else np.stack([X, Y, YAW], axis=1)
+                break
             win = np.clip(idx[:, None] + np.arange(0, 12)[None, :], 0, M - 1)    # nearest, forward only
             dd = np.hypot(P[rows[:, None], win, 0] - X[:, None], P[rows[:, None], win, 1] - Y[:, None])
             idx = win[rows, np.argmin(dd, axis=1)]
@@ -499,9 +542,10 @@ class Avoider:
             dist = np.maximum(np.hypot(tx - X, ty - Y), 1e-3)
             want = np.clip(np.arctan2(2.0 * p.wheelbase * np.sin(alpha), dist), -dmax, dmax)
             DEL += np.clip(want - DEL, -rate, rate)
-            X += step * np.cos(YAW)
-            Y += step * np.sin(YAW)
-            YAW += step / p.wheelbase * np.tan(DEL)
+            mv = ~done
+            X[mv] += step * np.cos(YAW[mv])
+            Y[mv] += step * np.sin(YAW[mv])
+            YAW[mv] += step / p.wheelbase * np.tan(DEL[mv])
             poses[s, :, 0], poses[s, :, 1], poses[s, :, 2] = X, Y, YAW
         return poses
 
@@ -517,8 +561,7 @@ class Avoider:
         cells, counts = np.unique(np.floor(pts / 0.05).astype(np.int64), axis=0, return_counts=True)
         q_all, w_all = (cells + 0.5) * 0.05, counts
         offsets = np.array([0.0, 0.5 * p.body_front, p.body_front])
-        radius = np.minimum(p.corridor_half_width,
-                            p.body_half_width + 0.05 + (p.corridor_half_width - p.body_half_width - 0.05) * moved)
+        tight = p.body_half_width + 0.05
         for k in range(K):
             px = poses[:, k, 0][:, None] + np.cos(poses[:, k, 2])[:, None] * offsets[None, :]
             py = poses[:, k, 1][:, None] + np.sin(poses[:, k, 2])[:, None] * offsets[None, :]
@@ -529,6 +572,11 @@ class Avoider:
             q, w = q_all[m], w_all[m]
             d2 = (px.reshape(-1, 1) - q[None, :, 0]) ** 2 + (py.reshape(-1, 1) - q[None, :, 1]) ** 2
             dmin = np.sqrt(d2.reshape(n_steps, 3, -1).min(axis=1))
+            # In the first metre the margin may shrink, so a truck that is already close to
+            # something can still steer away - but only down to the room it has now. Before
+            # v0.4.5 it always shrank to body + 5 cm, which let the truck cut corners.
+            floor = clamp(float(dmin[0].min()) - 0.03, tight, p.corridor_half_width)
+            radius = np.minimum(p.corridor_half_width, floor + (p.corridor_half_width - floor) * moved)
             r_k = radius - (relief[k] if relief is not None else 0.0)
             hits = ((dmin <= r_k[:, None]) * w[None, :]).sum(1) >= 2
             if hits.any():
@@ -560,7 +608,7 @@ class Avoider:
         kinds = ["offset"] * len(refs)
         labels = [float(d) for d in options]
 
-        poses = self._simulate(refs, x, y, yaw, ld, n_steps, step)
+        poses = self._simulate(refs, x, y, yaw, ld, n_steps, step, route.goal)
         # hysteresis: the option chosen last time gets 3 cm of slack so it does not flicker
         relief = np.array([0.03 if (self.kind == "offset" and abs(d - self.d) < 1e-6) else 0.0 for d in labels])
         first, gap, moved = self._collisions(poses, pts, x, y, step, relief)
@@ -577,7 +625,7 @@ class Avoider:
                 self.search_path = np.vstack([[x, y], self.search_path[j + 1:]]) \
                     if j + 1 < len(self.search_path) else None
             if self.search_path is not None and len(self.search_path) >= 2:
-                sp = self._simulate([self.search_path], x, y, yaw, ld, n_steps, step)
+                sp = self._simulate([self.search_path], x, y, yaw, ld, n_steps, step, route.goal)
                 f2, g2, _ = self._collisions(sp, pts, x, y, step, np.array([0.03]))
             if (f2 is None or f2[0] >= 0) and self.clock - self.search_t > self.SEARCH_EVERY:
                 self.search_path, goal_blocked = self._search(route, x, y, pts, yaw)
@@ -585,7 +633,7 @@ class Avoider:
                 self.search_goal_blocked = goal_blocked
                 f2 = None
                 if self.search_path is not None and len(self.search_path) >= 2:
-                    sp = self._simulate([self.search_path], x, y, yaw, ld, n_steps, step)
+                    sp = self._simulate([self.search_path], x, y, yaw, ld, n_steps, step, route.goal)
                     f2, g2, _ = self._collisions(sp, pts, x, y, step)
             if f2 is not None:
                 refs.append(self.search_path)

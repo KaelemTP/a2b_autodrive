@@ -6,6 +6,12 @@
 1. Way round a wide barrier: the steering must not slam from full lock one way to full lock
    the other (it did 10.0 -> 5.0 -> 10.0 -> 5.2 % in the video).
 2. The simulated drive ("green line") must stop at B instead of carrying on and looping round it.
+4. (found in the MuJoCo scenarios, 0.4.6) B blocked by a crate, the truck ends up beside it
+   past the end of the route, 1.0-2.5 m from B: it must finish "as close as it can get", not
+   wait forever in DRIVING at 0 m/s.
+5. (0.4.7) wide barrier with lidar-like noise (only the faces the truck can see, 1 cm noise,
+   10 % of points missing): the truck must follow the way round, not circle. The way-round path
+   was never trimmed as the truck drove along it, so the aim point drifted back behind it.
 3. With a bigger real-truck margin (corridor_half_width 0.50) the truck still gets round the
    usual obstacles, and keeps more room.
 """
@@ -92,6 +98,48 @@ if __name__ == "__main__":
         gap = min(r[5] for r in log)
         print(f"3 margin 0.50 {name:12s} state={cmd.state:8s} min_gap={gap:.2f} m")
         ok &= cmd.state == "ARRIVED" and gap > 0.30
+
+    # 4. beside a blocked B, past the end of the route (MuJoCo scenario 7 stalled here)
+    crate = np.array(box_pts(6.5, -0.5, 7.5, 0.5))
+    for start in [(6.85, 1.32, 0.09), (6.8, -1.2, -0.1)]:
+        p = Params(avoid_enable=True)
+        ctl = A2BController(p)
+        sim = TruckSim(p, *start)
+        ctl.set_route([(0, 0), (7, 0)])
+        t = 0.0
+        while t < 15.0 and ctl.state not in ("ARRIVED", "STOPPED"):
+            cmd = ctl.step((sim.x, sim.y, sim.yaw), sim.v, DT, float("inf"), 0.0, obstacle_points=crate)
+            sim.step(cmd.pwm, DT)
+            t += DT
+        reason = cmd.info.get("reason", "")
+        print(f"4 beside blocked B {start}: state={cmd.state:8s} t={t:4.1f}s '{reason}'")
+        ok &= cmd.state == "ARRIVED" and "as close as it can get" in reason
+
+    # 5. wide barrier, noisy partial lidar points (the MuJoCo video looped here)
+    wall = np.array(box_pts(4.6, -2.0, 4.9, 2.6, step=0.02))
+
+    def seen(px, pts):
+        side = (pts[:, 0] < 4.62) if px < 4.6 else (pts[:, 0] > 4.88) if px > 4.9 else np.zeros(len(pts), bool)
+        return pts[side | (np.abs(pts[:, 1] - 2.6) < 0.02) | (np.abs(pts[:, 1] + 2.0) < 0.02)]
+
+    times = []
+    for seed in range(6):
+        rng = np.random.default_rng(seed)
+        p = Params(avoid_enable=True)
+        ctl = A2BController(p)
+        sim = TruckSim(p, 0.0, 0.0, 0.0)
+        ctl.set_route([(0, 0), (10, 0)])
+        t = 0.0
+        while t < 60.0 and ctl.state not in ("ARRIVED", "STOPPED"):
+            v = seen(sim.x, wall)
+            keep = rng.random(len(v)) > 0.1
+            o = v[keep] + rng.normal(0, 0.01, (int(keep.sum()), 2))
+            cmd = ctl.step((sim.x, sim.y, sim.yaw), sim.v, DT, float("inf"), 0.0, obstacle_points=o)
+            sim.step(cmd.pwm, DT)
+            t += DT
+        times.append(t if ctl.state == "ARRIVED" else float("inf"))
+    print(f"5 noisy wide barrier: arrival times {[round(x, 1) for x in times]} s")
+    ok &= max(times) < 40.0
 
     print("all video checks passed" if ok else "SOME VIDEO CHECKS FAILED")
     sys.exit(0 if ok else 1)

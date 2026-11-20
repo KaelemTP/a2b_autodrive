@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.7 (2026-11-20)
+
+- Fixed: the truck circled instead of following the way round (Hybrid A*). The way-round path
+  was never trimmed as the truck drove along it (the nearest point was always the truck's own
+  position from the last cycle), so the aim point drifted back behind the truck and the steering
+  went to full lock. Seen in the MuJoCo video (wide barrier: a full loop, 43.7 s); now one
+  smooth way round in 27.5 s. With noisy lidar points it never arrived before; now ~26 s.
+  Regression check 5 in `test/video_checks.py`.
+- The way round's closest allowed distance now grows with `corridor_half_width`
+  (corridor - 0.07 m): unchanged in the sims (0.28 m), 0.43 m on the real truck (was 0.28 m).
+
+## 0.4.6 (2026-11-20)
+
+- Fixed: with an obstacle sitting on B, the truck could go round it, come out beside B past
+  the end of the route (1.0-2.5 m from B), and stand there forever in DRIVING at 0 m/s. It now
+  finishes "as close as it can get". If B is not blocked it keeps driving towards B instead.
+  Found by the new MuJoCo scenarios; regression check 4 in `test/video_checks.py`.
+- New `test/mujoco_scenarios.py`: 8 scenarios in the MuJoCo yard with the 3D lidar and KISS-ICP
+  (waypoint turn, crate, slalom, wide barrier / Hybrid A*, 0.75 m pillar gate, boxed in -> back
+  up, B blocked, lidar dropout). Checks the outcome, 0 contacts and lidar error; `--video` renders
+  an mp4 like the coworker's test video.
+- MuJoCo world: test obstacles (`extra_xml`) and reverse below 7.3 % PWM (sim assumption, same
+  as TruckSim). Before, 6.3-7.0 % braked, so backing up could not be tried in MuJoCo.
+
 ## 0.4.5 (2026-11-19)
 
 From a coworker's MuJoCo test video (8 scenarios, all passed, 0 contacts):

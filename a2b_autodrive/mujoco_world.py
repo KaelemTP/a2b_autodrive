@@ -83,8 +83,9 @@ def _yard_xml():
     return "\n".join(g)
 
 
-def build_mjcf(start_x=0.0, start_y=0.0, start_yaw=0.0):
-    """MJCF string of the yard with the truck at the given start pose (yaw in rad)."""
+def build_mjcf(start_x=0.0, start_y=0.0, start_yaw=0.0, extra_xml=""):
+    """MJCF string of the yard with the truck at the given start pose (yaw in rad).
+    extra_xml: more <geom>s for the worldbody, e.g. test obstacles."""
     return f"""
 <mujoco model="a2b_yard">
   <option timestep="0.002" gravity="0 0 -9.81"/>
@@ -109,11 +110,13 @@ def build_mjcf(start_x=0.0, start_y=0.0, start_yaw=0.0):
     <material name="track" rgba="0.10 0.10 0.10 1"/>
     <material name="cabin" rgba="0.20 0.25 0.32 1"/>
     <material name="lidar" rgba="0.85 0.85 0.88 1"/>
+    <material name="obstacle" rgba="0.90 0.30 0.22 1"/>
   </asset>
   <worldbody>
     <light pos="4 -3 12" dir="-0.2 0.3 -1" directional="true" castshadow="true" diffuse="0.6 0.6 0.6"/>
     <geom name="floor" type="plane" pos="6 0 0" size="11 8 0.1" material="floor"/>
     {_yard_xml()}
+    {extra_xml}
     <body name="truck" pos="0 0 0">
       <joint name="tx" type="slide" axis="1 0 0" damping="0"/>
       <joint name="ty" type="slide" axis="0 1 0" damping="0"/>
@@ -158,10 +161,10 @@ class MujocoTruckWorld:
     """The yard + truck. step(pwm, dt) drives it, scan() returns one lidar sweep."""
 
     def __init__(self, params: Params = None, start=(0.0, 0.0, 0.0), top_speed=2.0, tau=0.5,
-                 lidar_noise=0.01, max_range=40.0, n_az=720, elevations_deg=None, seed=1):
+                 lidar_noise=0.01, max_range=40.0, n_az=720, elevations_deg=None, seed=1, extra_xml=""):
         self.p = params or Params()
         self.top_speed, self.tau = top_speed, tau
-        self.model = mujoco.MjModel.from_xml_string(build_mjcf(*start))
+        self.model = mujoco.MjModel.from_xml_string(build_mjcf(*start, extra_xml=extra_xml))
         self.data = mujoco.MjData(self.model)
         mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
         mujoco.mj_forward(self.model, self.data)
@@ -215,8 +218,11 @@ class MujocoTruckWorld:
             if drive_duty >= p.drive_forward_min:
                 v_cmd = (drive_duty - NEUTRAL) / 2.5 * self.top_speed
                 f_long = m * (v_cmd - v_long) / self.tau
-            elif drive_duty < NEUTRAL - 0.5:                                  # brake
+            elif drive_duty <= p.brake_duty + 0.3:                            # brake
                 f_long = -m * clamp(v_long / 0.05, -3.0, 3.0)
+            elif drive_duty <= NEUTRAL - 0.2:      # reverse (sim assumption, same as TruckSim)
+                v_cmd = -(NEUTRAL - drive_duty) / 2.5 * self.top_speed
+                f_long = m * (v_cmd - v_long) / self.tau
             else:                                                             # coast
                 f_long = -m * clamp(v_long / 0.2, -0.5, 0.5)
             f_lat = -m * v_lat / 0.03

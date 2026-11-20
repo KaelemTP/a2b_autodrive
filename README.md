@@ -1,7 +1,7 @@
 # a2b_autodrive
 
 Drives the mini dump truck from where it is now (A) to a goal point (B), optionally through
-waypoints, steering around obstacles on the way, and stops there. ROS 2 Humble, Python. Version **0.4.5**.
+waypoints, steering around obstacles on the way, and stops there. ROS 2 Humble, Python. Version **0.4.7**.
 
 It runs in three setups with the same algorithm:
 
@@ -284,5 +284,7 @@ Common problems:
 | `a2b_autodrive/sim_viewer_node.py` | Live 3D view in the browser (Flask), obstacle placing, contact check |
 | `web/` | The 3D page (`index.html`) and three.js (MIT licence), served locally, no internet needed |
 | `test/offline_sim.py` | Offline checks of the algorithm without ROS: `python3 test/offline_sim.py` |
+| `test/video_checks.py` | Quick checks for the problems seen in test videos (steering, path past B, margin, blocked B) |
+| `test/mujoco_scenarios.py` | 8 obstacle scenarios in MuJoCo with the 3D lidar and KISS-ICP; `--video out.mp4` renders a test video (`pip install mujoco kiss-icp imageio imageio-ffmpeg pillow`) |
 
 See `CHANGELOG.md` for what changed in each version.

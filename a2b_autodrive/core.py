@@ -270,6 +270,7 @@ class Avoider:
         self.ref = None         # chosen reference path, (M, 2) numpy array
         self.clearance = float("inf")
         self.goal_blocked = False
+        self.b_tight = False    # obstacle points right next to B (B itself is probably blocked)
         self.search_path = None
         self.search_t = -1e9
         self.clock = 0.0
@@ -317,7 +318,9 @@ class Avoider:
                     src = occ[max(0, -dx):nx - max(0, dx), max(0, -dy):ny - max(0, dy)]
                     out[max(0, dx):nx - max(0, -dx), max(0, dy):ny - max(0, -dy)] |= src
             return out
-        return (dilate(p.body_half_width + 0.08), dilate(p.corridor_half_width + 0.05),
+        # hard: the way round may not come closer than this. corridor - 0.07 = 0.28 m in the sims
+        # (body + 0.08, as before) and grows with the real truck's bigger corridor (0.43 m at 0.50)
+        return (dilate(max(p.body_half_width + 0.08, p.corridor_half_width - 0.07)), dilate(p.corridor_half_width + 0.05),
                 dilate(p.corridor_half_width + 0.40))
 
     def _search(self, route, x, y, pts, yaw=0.0):
@@ -621,9 +624,13 @@ class Avoider:
             goal_blocked = getattr(self, "search_goal_blocked", False)
             f2 = None
             if self.search_path is not None:   # keep the way round found earlier while it is free
-                j = int(np.argmin(np.hypot(*(self.search_path - [x, y]).T)))
-                self.search_path = np.vstack([[x, y], self.search_path[j + 1:]]) \
-                    if j + 1 < len(self.search_path) else None
+                # drop the part already driven. Point 0 is where the truck was last cycle (put
+                # there below), so look for the nearest point after it: before 0.4.7 point 0 always
+                # won, nothing was dropped, and the aim point drifted back behind the truck
+                # (it circled at full lock instead of following the way round)
+                sp = self.search_path
+                j = 1 + int(np.argmin(np.hypot(*(sp[1:] - [x, y]).T))) if len(sp) > 1 else 0
+                self.search_path = np.vstack([[x, y], sp[j + 1:]]) if j + 1 < len(sp) else None
             if self.search_path is not None and len(self.search_path) >= 2:
                 sp = self._simulate([self.search_path], x, y, yaw, ld, n_steps, step, route.goal)
                 f2, g2, _ = self._collisions(sp, pts, x, y, step, np.array([0.03]))
@@ -671,6 +678,7 @@ class Avoider:
         # lidar only sees the near side of things, so "right next to" is generous: 0.7 m)
         b_tight = len(pts) > 0 and bool((np.hypot(pts[:, 0] - route.goal[0], pts[:, 1] - route.goal[1])
                                           < p.corridor_half_width + 0.35).sum() >= 3)
+        self.b_tight = b_tight
         self.goal_blocked = (not free) and (goal_blocked or b_tight or all(r[4] for r in results))
         self.path = [(round(x, 2), round(y, 2))] + \
             [(round(float(a), 2), round(float(b), 2)) for a, b in poses[2::3, k, :2]]
@@ -872,12 +880,22 @@ class A2BController:
             self.stop(f"off route ({cte:.2f} m)")
             return self._stopped(cmd, dt)
         # arrival: close to B, or we have passed the end of the route
-        if dist_goal < p.goal_tolerance or ((i >= len(self.route.pts) - 1 or remaining <= p.goal_tolerance)
-                                            and dist_goal < 1.0):
+        end_passed = i >= len(self.route.pts) - 1 or remaining <= p.goal_tolerance
+        if dist_goal < p.goal_tolerance or (end_passed and dist_goal < 1.0):
             self.state = self.ARRIVED
             self.stop_reason = "arrived at B" if dist_goal < p.goal_tolerance + 0.15 else \
                 f"arrived at B ({dist_goal:.2f} m away, came in from the side)"
             return self._stopped(cmd, dt)
+        if end_passed and self.avoiding and self.avoider.b_tight and dist_goal <= p.goal_blocked_arrive:
+            # went round an obstacle sitting on B and came out beside it: this is as close as it
+            # gets (before 0.4.6 it stood here forever in DRIVING at 0 m/s)
+            self.state = self.ARRIVED
+            self.stop_reason = (f"as close as it can get: {dist_goal:.2f} m from B "
+                                f"(B is blocked by an obstacle)")
+            return self._stopped(cmd, dt)
+        if end_passed:
+            # beside B but not there yet: keep going towards B instead of planning to stop
+            remaining = max(remaining, dist_goal)
 
         # ---- lateral: pure pursuit ---------------------------------------
         v = max(speed, 0.0)
